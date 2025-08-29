@@ -1,0 +1,755 @@
+---
+title: "Thrive by Five 2024 - Province score investigation"
+author: "Tyryn Carnegie"
+date: last-modified
+format:
+  html:
+    theme: united
+    embed-resources: true     # <-- Quarto equivalent of self_contained
+    highlight-style: tango
+    toc: true
+    toc-depth: 5
+    number-sections: false
+    anchor-sections: false
+# editor: source  # optional
+---
+
+# Set-up
+
+## Packages
+```{r}
+pacman::p_load(
+  dplyr,
+  ggplot2,
+  tidyr,
+  lubridate,
+  stringr,
+  haven,
+  scales,
+  flextable,
+  leaflet
+)
+source("functions.R")
+
+```
+
+## Load data
+
+```{r}
+# 2021 data --------------------------------------------------------------------
+tb5_2021 <- read_dta("data/thrive_by_five_20230830.dta") #%>% 
+  # Generate variables to align with functions 
+
+#tb5_2021
+
+
+
+
+
+# 2024 data --------------------------------------------------------------------
+tb5_2024 <- read_dta("data/2024tb5_all_forms_inter_data.dta") #%>% 
+  # Generate variables to align with functions 
+
+# Get the id_enumerator variable from an earlier dataset
+tb5_2024_id_enumerator  <- read_dta("data/tb5_2024_elom_elp_client.dta") %>% 
+  select(id_child, id_enumerator)
+tb5_2024 <- tb5_2024 %>% 
+  left_join(tb5_2024_id_enumerator, by = join_by(id_child))
+
+```
+
+## Regenerate 2021 fee cuts according to 2024 thresholds
+The 2021 figures are inflated to adjust for inflation. Here I assume an 8.9% increase between October 2022 and October 2024. To get this inflation rate I used an [online inflation calculator](https://inflationcalc.co.za/?date1=2022-10-01&amount=100&date2=2024-10-01).
+
+Immediately interesting is the lower proportion of high quintile assessments in the 2021 sample. Given the low scores in 2024 we may have expected a greater proportion in *Q5 low* and *Q5 high* in the 2024 sample. Also note the high proportion of missing fee values in the 2021 sample.
+
+```{r}
+# Generate new fee variable
+tb5_2021 <- tb5_2021 %>% 
+  mutate(fees_amount = ifelse(fees==0, 0, fees_amount)) %>% 
+  mutate(fees_amount_deflated =  fees_amount*1.089) 
+
+# Generate a fee group variable according to the 2024 cuts
+tb5_2021 <- tb5_2021 %>% 
+  mutate(n_pri_fee_group7 = case_when(
+    fees_amount_deflated<=60 ~ 1, # These thresholds were taken from the 2024 data
+    fees_amount_deflated>60 & fees_amount_deflated<=120 ~ 2,
+    fees_amount_deflated>120 & fees_amount_deflated<=240 ~ 3,
+    fees_amount_deflated>240 & fees_amount_deflated<=350 ~ 4,
+    fees_amount_deflated>350 & fees_amount_deflated<=800 ~ 5,
+    fees_amount_deflated>800 & fees_amount_deflated<=1690 ~ 6,
+    fees_amount_deflated>1690 ~ 7,
+    TRUE ~  NA
+  ))
+
+
+
+```
+
+```{r, echo=FALSE}
+#| label: tbl-2021-fees-groups
+#| tbl-cap: "2021 Fee Groups"
+
+
+tb5_2021 %>% 
+  group_by(n_pri_fee_group7) %>% 
+  summarise(n = n(), .groups = "drop") %>% 
+  mutate(prop = round(100*(n/sum(n)),1)) %>% 
+  knitr::kable()
+
+
+```
+
+```{r, echo=FALSE}
+#| label: tbl-2024-fees-groups
+#| tbl-cap: "2024 Fee Groups"
+
+
+tb5_2024 %>% 
+  group_by(n_pri_fee_group7) %>% 
+  summarise(n = n(), .groups = "drop") %>% 
+  mutate(prop = round(100*(n/sum(n)),1)) %>% 
+  knitr::kable()
+
+
+```
+
+
+# Replicate Cohen's D charts with 2021 Index data
+
+Reuse Colin's code to replicate the Cohen's D charts used to identify outliers in the 2024 data. Here we are testing the hypothesis that the WC's 2021 data was actually biased upwards due to certain assessors scoring higher than they should have. Note that when we are investigating by province we are picking up any assessors whose scores differ substantially from other assessors in that province.
+
+Here is the plot identifying outliers in the 2024 sample. Note that there is only one and they were left in the sample because they only assessed 4 kids. All other outliers identified using the Cohen's D approach were removed at the start of 2025. 
+```{r, warning=FALSE}
+#| label: tbl-2024-Cohens-D
+#| tbl-cap: "2024 Cohen's D outliers"
+#| fig-height: 10
+
+plot_enumerator_cohens_d(tb5_2024)
+
+```
+
+@tbl-2021-Cohens-D highlights the assessors in the 2021 sample whose scores sit +- 0.8 standard deviations from the sample mean. Seven assessors who would have been dropped in the 2024 sample were left in the 2021 sample. Because we're interested in whether there were assessors that scored too high in the Western Cape in the 2021 wave, we checked which province the two "red" assessors were from. **One of the two did conduct their assessments in the Western Cape.**
+
+- 2681: `r unique(na.omit(tb5_2021$prov_geo[tb5_2021$id_enumerator == "2681"]))`
+- 2762:  `r unique(na.omit(tb5_2021$prov_geo[tb5_2021$id_enumerator == "2762"]))`
+
+
+```{r, warning=FALSE}
+#| label: tbl-2021-Cohens-D
+#| tbl-cap: "2021 Cohen's D outliers"
+#| fig-height: 10
+
+plot_enumerator_cohens_d(tb5_2021, score_var = total_elom)
+
+```
+
+
+## Group by fee
+This is to check whether the highlighted outliers change when we split the Cohen's D analysis by fee group. We are particularly interested in whether there were WC assessors who in 2021 scored substantially higher than other assessors for a particular fee group. 
+
+Only the 2021 data is explored below.
+
+A few assessors stand out across fee groups. The following were consistently "high score" outliers:
+
+- 2681: `r unique(na.omit(tb5_2021$prov_geo[tb5_2021$id_enumerator == "2681"]))`
+- 2762: `r unique(na.omit(tb5_2021$prov_geo[tb5_2021$id_enumerator == "2762"]))`
+- 563 (all within their Fee group 2): `r unique(na.omit(tb5_2021$prov_geo[tb5_2021$id_enumerator == "563"]))`
+- 1394: `r unique(na.omit(tb5_2021$prov_geo[tb5_2021$id_enumerator == "1394"]))`
+
+Assessor 2681, who operated in the Western Cape, did about 20% of assessments in the province. This assessor could certainly have biased scores upwards and could offer an explanation why the province's scores dropped in the 2024 wave. It may be worth exploring how the province ranks if we remove their scores (though changes in fee composition will make this less than straightforward).
+
+Then for completeness sake, the following asssessors were consistent "low score" outliers even after controlling for fees:
+
+- 2795: `r unique(na.omit(tb5_2021$prov_geo[tb5_2021$id_enumerator == "2795"]))`
+- 755: `r unique(na.omit(tb5_2021$prov_geo[tb5_2021$id_enumerator == "755"]))`
+- 2976: `r unique(na.omit(tb5_2021$prov_geo[tb5_2021$id_enumerator == "2976"]))`
+
+::: {.panel-tabset}
+
+### Fee group 1 low
+
+```{r}
+tb5_2021_fee <- tb5_2021 %>% 
+  filter(n_pri_fee_group7==1)
+
+plot_enumerator_cohens_d(tb5_2021_fee, score_var = total_elom)
+
+
+
+```
+
+
+### Fee group 1 high
+
+```{r}
+tb5_2021_fee <- tb5_2021 %>% 
+  filter(n_pri_fee_group7==2)
+
+plot_enumerator_cohens_d(tb5_2021_fee, score_var = total_elom)
+
+
+
+```
+
+
+### Fee group 2
+
+```{r}
+tb5_2021_fee <- tb5_2021 %>% 
+  filter(n_pri_fee_group7==3)
+
+plot_enumerator_cohens_d(tb5_2021_fee, score_var = total_elom)
+
+
+
+```
+
+### Fee group 3
+
+```{r}
+tb5_2021_fee <- tb5_2021 %>% 
+  filter(n_pri_fee_group7==4)
+
+plot_enumerator_cohens_d(tb5_2021_fee, score_var = total_elom)
+
+
+
+```
+
+### Fee group 4
+
+```{r}
+tb5_2021_fee <- tb5_2021 %>% 
+  filter(n_pri_fee_group7==5)
+
+plot_enumerator_cohens_d(tb5_2021_fee, score_var = total_elom)
+
+
+
+```
+
+### Fee group 5 low
+
+```{r}
+tb5_2021_fee <- tb5_2021 %>% 
+  filter(n_pri_fee_group7==6)
+
+plot_enumerator_cohens_d(tb5_2021_fee, score_var = total_elom)
+
+
+
+```
+
+### Fee group 5 high
+
+```{r}
+tb5_2021_fee <- tb5_2021 %>% 
+  filter(n_pri_fee_group7==7)
+
+plot_enumerator_cohens_d(tb5_2021_fee, score_var = total_elom)
+
+
+
+```
+:::
+
+## A deeper dive into Assessor 2681
+
+Here we explore how Assessor 2681 compared to other Western Cape assessors, whether there were items that they scored particularly highly in, and what would happen if we were to exclude their assessments from the sample.
+
+### Comparison to other Western Cape assessors
+The figure below shows the distribution for all Western Cape assessors. The average score is substantially higher, though this is likely due to Assessor 2681 who still scores much higher than the other assessors in the province (though not above 0.8 SD). **There is growing evidence to believe that this assessor should have been removed from the 2021 sample.**
+
+
+```{r}
+tb5_2021_prov <- tb5_2021 %>% 
+  filter(prov_geo == "Western Cape")
+
+plot_enumerator_cohens_d(tb5_2021_prov, score_var = total_elom)
+
+
+```
+
+
+### Problematic items
+An earlier investigation of all DataDrive2030's data showed certain assessors would score certain items peculiarly - perhaps due to misunderstanding how to score the item or for some other reason. @tbl-wc-item-scores below compares Assessor 2681's scores (as a %) for every item compared to other assessors in the Western Cape.
+
+**The table is crucial to understanding why Assessor 2681 is an outlier.** For items 1, 5, 14 and 22 they scored close to 100% on every assessment. For item 5 the average scores for the other assessors are also high but for the other highlighted items the other assessors' average scores are substantially lower. This strongly suggests that in the 2021 sample Assessor 2681 did not assess these items correctly and that their assessments should have been discarded or the problematic items' values imputed. 
+
+```{r, echo=FALSE}
+#| label: tbl-wc-item-scores
+#| tbl-cap: "Average % item scores for Western Cape assessors"
+# Get maximum possible scores
+possible_scores <- paste0("score_", c(1:23))
+
+maximum_score <- sapply(possible_scores, function(col) {
+  max(tb5_2021[[col]], na.rm = TRUE)
+})
+
+maximum_score_df <- data.frame(
+  name = names(maximum_score),
+  maximum = as.numeric(maximum_score),
+  row.names = NULL
+)
+
+# For each assessor, get the average
+df_wide <- tb5_2021 %>% 
+  filter(prov_geo=="Western Cape") %>% 
+  select(id_enumerator, paste0("score_", c(1:23))) %>% 
+  pivot_longer(cols=c(paste0("score_", c(1:23)))) %>% 
+  group_by(id_enumerator, name) %>% 
+  summarise(mean = mean(value)) %>% 
+  ungroup() %>% 
+  left_join(maximum_score_df) %>% 
+  mutate(prop = round(mean/maximum*100,1)) %>% 
+  mutate(item = as.numeric(str_remove(name, "score_"))) %>% 
+  select(id_enumerator, item,  prop) %>% 
+  pivot_wider(names_from=id_enumerator, names_prefix="id_", values_from=prop ) %>% 
+  select(item, id_2681, everything()) %>% 
+  arrange(item)
+
+
+
+# Build a color mapping function: low% -> darker gray, high% -> red
+col_fun <- scales::col_numeric(
+  palette = c("#444444", "#FF0000"),   # from dark gray to red
+  domain  = c(90, 100),
+  na.color = "#444444"
+)
+
+# Columns to format (all % columns)
+pct_cols <- setdiff(names(df_wide), "item")
+
+# Create flextable
+ft <- flextable(df_wide)
+
+# Format as percentages with one decimal; show blanks for NA
+ft <- colformat_num(
+  ft, j = pct_cols,
+  digits = 1, suffix = "%", na_str = ""
+)
+
+# Apply per-cell text color based on closeness to 100
+for (col in pct_cols) {
+  vals <- df_wide[[col]]
+  vals_clamped <- pmin(pmax(vals, 0), 100)           # keep within [0, 100]
+  colors <- ifelse(is.na(vals), NA, col_fun(vals_clamped))
+  idx <- which(!is.na(vals))
+  if (length(idx) > 0) {
+    ft <- color(ft, i = idx, j = col, color = colors[idx], part = "body")
+  }
+}
+
+# Nice-to-haves
+ft <- align(ft, j = pct_cols, align = "center", part = "all")
+ft <- autofit(ft)
+ft <- theme_vanilla(ft)
+
+ft
+
+
+
+```
+
+### How outcomes change when after excluding 2681
+
+While Assessor 2681 was not the only outlier in the 2021 sample, here we see to what degree the Western Cape's scores move towards the other provinces after removing their assessments from the sample. 
+
+```{r, echo=FALSE}
+library(purrr)
+# --- 0) Clean base data -----------------------------------------------
+tb5_2021 <- tb5_2021 %>%
+  mutate(
+    id_enumerator = as.character(id_enumerator)  # ensure consistent type
+  )
+
+# We'll exclude NA fee groups ONLY where fee-group logic is used.
+# Baseline provincial props do not depend on fee groups, so we keep full data (prov_geo != "").
+# All fee-group matching & resampling uses df_fee (no NA fee groups).
+df_fee <- tb5_2021 %>%
+  filter(!is.na(n_pri_fee_group7))
+
+# --- 1) Baseline table (all data, province-level) ---------------------
+prop_ot_baseline <- tb5_2021 %>% 
+  # filter(prov_geo != "") %>% 
+  group_by(prov_geo) %>% 
+  summarise(prop_baseline = mean(total_elom_cuts == 3, na.rm = TRUE), .groups = "drop")
+
+# --- 2) Remove assessor 2681 (province-level) -------------------------
+prop_ot_remove_2681 <- tb5_2021 %>% 
+  filter(id_enumerator != "2681") %>% 
+  group_by(prov_geo) %>% 
+  summarise(prop_remove_2681 = mean(total_elom_cuts == 3, na.rm = TRUE), .groups = "drop")
+
+# --- 3) Loss proportions by fee group in Western Cape -----------------
+# Counts restricted to non-missing fee groups
+baseline_counts <- df_fee %>%
+  filter(prov_geo == "Western Cape") %>%
+  count(n_pri_fee_group7, name = "n_before")
+
+after_counts <- df_fee %>%
+  filter(prov_geo == "Western Cape", id_enumerator != "2681") %>%
+  count(n_pri_fee_group7, name = "n_after")
+
+loss_prop <- baseline_counts %>%
+  left_join(after_counts, by = "n_pri_fee_group7") %>%
+  mutate(
+    n_after  = ifelse(is.na(n_after), 0L, n_after),
+    loss_prop = pmax(0, 1 - n_after / n_before)  # guard against tiny negatives
+  )
+
+# --- 4) Function to randomly drop data in other provinces -------------
+# Uses fractional keep (1 - p) to avoid rounding issues in small cells.
+drop_proportion <- function(data, loss_prop_tbl) {
+  data %>%
+    # work only with non-missing fee groups
+    filter(!is.na(n_pri_fee_group7)) %>%
+    group_by(n_pri_fee_group7) %>%
+    group_modify(~ {
+      p <- loss_prop_tbl$loss_prop[match(.y$n_pri_fee_group7, loss_prop_tbl$n_pri_fee_group7)]
+      if (is.na(p) || p <= 0) return(.x)         # no drop if no loss
+      dplyr::slice_sample(.x, prop = max(0, 1 - p))
+    }) %>%
+    ungroup()
+}
+# 
+# # --- 5) Run simulations -----------------------------------------------
+# set.seed(123)
+# n_sims <- 10
+# 
+# sim_df <- map_dfr(1:n_sims, function(s) {
+#   # Start from fee-clean data for resampling logic
+#   tb5_adj <- df_fee %>%
+#     # remove 2681 ONLY in Western Cape
+#     filter(!(prov_geo == "Western Cape" & id_enumerator == "2681")) %>%
+#     group_by(prov_geo) %>%
+#     group_modify(~ if (.y$prov_geo != "Western Cape") drop_proportion(.x, loss_prop) else .x) %>%
+#     ungroup()
+# 
+#   # Compute province-level On Track on the adjusted (fee-clean) set
+#   tb5_adj %>%
+#     group_by(prov_geo) %>%
+#     summarise(on_track_prop = mean(total_elom_cuts == 3, na.rm = TRUE), .groups = "drop") %>%
+#     mutate(sim = s)
+# })
+# 
+# # --- 6) Summarise across simulations ----------------------------------
+# summary_df <- sim_df %>%
+#   group_by(prov_geo) %>%
+#   summarise(
+#     mean_on_track = mean(on_track_prop),
+#     sd_on_track   = sd(on_track_prop),
+#     lower95       = quantile(on_track_prop, 0.025),
+#     upper95       = quantile(on_track_prop, 0.975),
+#     .groups = "drop"
+#   )
+# 
+# summary_df
+
+# Optional: write out
+#write.csv2(summary_df, "data/resampling_simulation_data.csv", row.names = FALSE)
+
+
+```
+
+
+In @tbl-wc-readjusted-scores we compare the Western Cape to other provinces before and after removing Assessor 2681, and then adjusted the other provinces by randomly subsampling their data to reflect the same loss of fee groups that occurred in the Western Cape. This adjustment made little difference to the other provinces’ results, since Assessor 2681’s assessments were spread relatively evenly across fee groups, meaning that removing them did not substantially alter the balance of children by fee group.
+
+Removing Assessor 2681 means pulling the Western Cape's scores closer to the other provinces, though it would be be important to see how sampling weights would affect this too.
+
+
+```{r}
+#| label: tbl-wc-readjusted-scores
+#| tbl-cap: "Provincial On Track proportions: baseline, after removing Assessor 2681, and after resampling other provinces"
+
+summary_df <- read.csv2("data/resampling_simulation_data.csv")
+
+prop_ot_adjustment <- prop_ot_baseline %>% 
+  left_join(prop_ot_remove_2681) %>% 
+  left_join(summary_df) %>% 
+  select(1:4) %>% 
+  mutate(across(-1, ~ round(.x * 100, 1))) %>% 
+  arrange(desc(prov_geo))
+
+label_map <- stats::setNames(
+  object = c("Province", "Original", "2681 dropped", "Other provinces resampled"),
+  nm     = names(prop_ot_adjustment)[1:4]
+)
+
+flextable(prop_ot_adjustment) %>% 
+  set_header_labels(values = label_map) %>% 
+  colformat_num(j = 2:4, digits = 1, suffix = "%") %>% 
+  bold(part = "header") %>% 
+  align(j = 2:4, align = "center", part = "all")
+
+```
+
+
+
+
+
+
+
+
+# Re-Examine the Province-Level Number Lines
+
+Here we return to the 2024 data with a focus on the Western Cape. 
+
+## Exploring how the proportion On Track changes when we change the threshold
+
+Here we hypothesis that for the Western Cape there is a cluster of ELOM scores just below the "On Track" score threshold. If so, it would offer an explanation why we're seeing unexpectedly few children On Track in the province. @fig-score-distribution shows how Total ELOM scores are distributed for each province. The the red dotted vertical line shows the location of the On Track threshold. 
+
+There are a couple of important takeaways from the figures:
+
+- There doesn't appear to be a cluster just below the On Track threshold in the Western Cape.
+- There is a substantial cluster *just* above the On Track threshold for the Free State. **This could explain their substantially higher proportion On Track.**
+- We see something similarly in the Limpopo. 
+- Of all provinces, Gauteng and Kwa-Zulu Natal have the highest proportion of assessments just below the On Track threshold. 
+
+
+```{r, echo=FALSE}
+#| label: fig-score-distribution
+#| fig-cap: "Total ELOM score distribution, by province"
+#| fig-height: 12
+#| fig-cap-location: top
+
+tb5_2024 %>%
+  ggplot(aes(x = n_elom_total_score)) +
+  geom_histogram(binwidth = 1, fill = "lightblue", color = "white") +
+  geom_vline(xintercept = 46.32, color = "red", linetype = "dashed", size = 1) +
+  scale_x_continuous(limits = c(20, 70)) +
+  labs(
+    title = NULL,
+    x = "n_elom_total_score",
+    y = "Count"
+  ) +
+  facet_wrap(~elom_prov) +   # facet by province
+  theme_minimal(base_size = 10)
+
+
+
+
+```
+
+To explore this further we take a look at how the proportion On Track changes when we alter the threshold from 46.32. @fig-score-ranking below shows what happens when we make these adjustments. Note that the data are now weighted (unlike the histograms above):
+
+- The rankings for the Free State (despite what we saw in the histogram) and Mpumalanga don't change with different thresholds.
+- The Western Cape's ranking moves to the second and third lowest if we lower the threshold by 2 and 4 points respectively. Otherwise there isn't much movement.
+- Among other provinces there is a great deal of change in ranking when we change the thresholds. This highlights how for most provinces scores are quite similar. 
+
+
+```{r, echo=FALSE}
+#| label: fig-score-ranking
+#| fig-cap: "Province ranking % On Track by On Track threshold"
+#| fig-cap-location: top
+# Choose thresholds to compare (you can add/remove values)
+thresholds <- c(42.32, 44.32, 46.32, 48.32, 50.32)
+
+# 1) Compute on-track proportion by province for each threshold
+rank_by_threshold <- tb5_2024 %>%
+  tidyr::crossing(threshold = thresholds) %>%
+  mutate(on_track = as.integer(n_elom_total_score >= threshold)) %>%
+  group_by(threshold, elom_prov) %>%
+  summarise(
+    prop = weighted.mean(on_track, weight_child, na.rm = TRUE),
+    .groups = "drop_last"
+  ) %>%
+  ungroup() %>%
+  group_by(threshold) %>%
+  mutate(rank = dense_rank(desc(prop))) %>%
+  arrange(threshold, rank) %>%
+  ungroup()
+
+# 2) Bump-chart style plot of ranking vs threshold
+ggplot(rank_by_threshold,
+       aes(x = threshold, y = rank, group = elom_prov, color = elom_prov)) +
+  geom_line(size = 2) +
+  geom_point(size = 3) +
+  scale_y_reverse(breaks = 1:max(rank_by_threshold$rank)) +  # rank 1 at top
+  scale_x_continuous(breaks = thresholds) +
+  labs(
+    title = NULL,
+    x = "On-Track threshold (46.32 the usual threshold)",
+    y = "Rank (1 = highest on-track proportion)",
+    color = "Province"
+  ) +
+  theme_minimal(base_size = 12)
+
+```
+
+## Required cut for 65% On Track in the Western Cape
+
+```{r, echo=FALSE}
+# Here is the cut
+ot_wc <- tb5_2024 %>%
+  filter(elom_prov == "Western Cape", !is.na(n_elom_total_score)) %>%
+  summarise(cut = quantile(n_elom_total_score, 0.35)) %>%
+  pull(cut)
+```
+
+
+Here we check what happens when we set the On Track threshold to whatever puts 65% of children On Track in the Western Cape. To get 65% of Western Cape children On Track we need to change the threshold to `r round(ot_wc,2)`. The table below ranks the provinces according to this new threshold, showing that the Western Cape remains the province with the fewest children On Track.
+
+```{r, echo=FALSE}
+#| label: tbl-wc-threshold
+#| tbl-cap: "% On Track in each province when 65% of Western Cape children are On Track"
+ot_ot_wc <- tb5_2024 %>% 
+  mutate(on_track = ifelse(n_elom_total_score>=ot_wc, 1, 0)) %>% 
+  group_by(elom_prov) %>% 
+  summarise(
+    `% On Track` = round(weighted.mean(on_track, weight_child, na.rm = TRUE)*100,1),
+    .groups = "drop_last"
+  ) %>% 
+  arrange(desc(`% On Track`))
+
+knitr::kable(ot_ot_wc)
+
+```
+
+# 2024 Index Checks
+
+## Total ELOM
+
+Here, for each province, we show the the percentage of children On Track in each of the fee groups against the corresponding national averages. Focusing on the Western Cape,  @tbl-index-checks shows notably lower proportions On Track for Q2 and Q3compared to the national average, but similar proportions for Q4, Q5 low and Q5 high. This may indicate:
+
+- ELPs in the Q2 and Q3 fee bands might be lower quality in the Western Cape compared to other provinces as a result of a relatively higher cost of living. 
+- One or two assessors in the Western Cape assessed most children in Q2 and Q3 with those assessors biasing scores downwards. 
+
+Looking at the data the second point doesn't really explain what's going on. For Q3 there are 5 Western Cape assessors with two doing just over half the assessments and the remainder done by the others. 
+
+```{r, include=FALSE}
+assessor_wc <- tb5_2024 %>% 
+  filter(elom_prov=="Western Cape") %>% 
+  group_by(n_pri_fee_group7) %>% 
+  count(id_enumerator)
+
+
+```
+
+
+
+```{r, echo=FALSE}
+#| label: tbl-index-checks
+#| tbl-cap: "% On Track by province and fee group"
+tb5_ot <- tb5_2024 %>% 
+  select(elom_prov, n_pri_fee_group7, weight_child, n_elom_total_cuts) %>% 
+  as_factor() %>% 
+  group_by(elom_prov, n_pri_fee_group7) %>% 
+  summarise(prop = weighted.mean(n_elom_total_cuts=="On Track", weight_child, na.rm=TRUE),
+            n = n())
+
+tb5_ot_national <- tb5_2024 %>% 
+  select(elom_prov, n_pri_fee_group7, weight_child, n_elom_total_cuts) %>% 
+  as_factor() %>% 
+  group_by(n_pri_fee_group7) %>% 
+  summarise(prop = weighted.mean(n_elom_total_cuts=="On Track", weight_child, na.rm=TRUE),
+            n = n()) %>% 
+  mutate(elom_prov="National")
+
+tb5_ot_prop <- tb5_ot_national %>% 
+  bind_rows(tb5_ot) %>% 
+  select(-n) %>% 
+  pivot_wider(names_from=n_pri_fee_group7, values_from = prop)
+
+tb5_ot_n <- tb5_ot %>% 
+  bind_rows(tb5_ot_national) %>% 
+  select(-prop) %>% 
+  pivot_wider(names_from=n_pri_fee_group7, values_from = n, values_fill=0)
+
+# --- Combine tb5_ot_prop and tb5_ot_n into one display table ---
+prop_long <- tb5_ot_prop %>%
+  pivot_longer(-elom_prov, names_to = "fee_group", values_to = "prop")
+
+n_long <- tb5_ot_n %>%
+  pivot_longer(-elom_prov, names_to = "fee_group", values_to = "n")
+
+tbl_display <- prop_long %>%
+  left_join(n_long, by = c("elom_prov", "fee_group")) %>%
+  mutate(
+    cell = paste0(percent(prop, accuracy = 0.1), "\n(n = ", comma(n), ")")
+  ) %>%
+  select(elom_prov, fee_group, cell) %>%
+  pivot_wider(names_from = fee_group, values_from = cell) %>%
+  mutate(is_national = elom_prov == "National") %>%
+  arrange(desc(is_national), elom_prov) %>%
+  select(-is_national)
+
+# --- Build flextable ---
+ft <- flextable(tbl_display) %>%
+  align(align = "center", part = "all") %>%
+  valign(valign = "middle", part = "all") %>%
+  bold(i = ~ elom_prov == "National", bold = TRUE, part = "body") %>%
+  autofit() %>%
+  set_caption("On Track (weighted proportion) and sample size by province and fee group")
+
+ft
+
+
+```
+
+
+```{r, echo=FALSE}
+# Clean up
+rm(ft, n_long, on_track_2_higher, on_track_2_lower, on_track_4_higher, on_track_4_lower, on_track_prop, ot_ot_wc, prop_long, prov_info, rank_by_threshold, tb5_2021_fee1high, 
+   tb5_2021_fee_1low, tb5_2021_fee3, tb5_2024_id_enumerator, 
+   tb5_ot, tb5_ot_n, tbl, tbl_display, tb5_ot_prop, tb5_2021_fee, tb5_2021_fee1low)
+
+
+```
+
+
+## Task Orientation
+
+This is to test the suspicion that the Western Cape has a high proportion of children affected by FAS. A significant proportion of children with low Task Orientation scores would suggest this.
+
+```{r}
+
+# tb5_to <- tb5_2024 %>% 
+#   select(elom_prov, contains("observation")) %>% 
+#   as_factor() %>% 
+#   
+
+
+
+```
+
+
+### Map locations of Western Cape assessments
+
+```{r}
+tb5_wc_map_df <- tb5_2024 %>%
+  filter(elom_prov == "Western Cape") %>%            # province filter
+  select(id_ecd, longitude, latitude) %>%
+  filter(!is.na(longitude), !is.na(latitude)) %>%    # drop missing coords
+  distinct(id_ecd, .keep_all = TRUE)   
+
+# compute bounds to auto-zoom
+# lng_rng <- range(tb5_wc_map_df$longitude)
+# lat_rng <- range(tb5_wc_map_df$latitude)
+# 
+# leaflet(tb5_wc_map_df, options = leafletOptions(minZoom = 3)) %>%
+#   addProviderTiles(providers$CartoDB.Positron) %>%
+#   addCircleMarkers(
+#     ~longitude, ~latitude,
+#     radius = 4, stroke = FALSE, fillOpacity = 0.7,
+#     clusterOptions = markerClusterOptions(spiderfyOnMaxZoom = TRUE)
+#   ) %>%
+#   addScaleBar(position = "bottomleft") %>%
+#   addMiniMap(tiles = providers$CartoDB.Positron, toggleDisplay = TRUE) %>%
+#   fitBounds(lng1 = lng_rng[1], lat1 = lat_rng[1],
+#             lng2 = lng_rng[2], lat2 = lat_rng[2])
+
+```
+
+
+
+
+# Match Sampled Wards to the SAIMD 
+
+
+
+
+
+
+

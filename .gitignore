@@ -2,3 +2,7 @@
 .Rhistory
 .RData
 .Ruserdata
+
+*.dta
+*.html
+tx5_province_score_investigation_files/

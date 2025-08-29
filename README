@@ -1,0 +1,26 @@
+Investigation into why WC scores are lower than what we'd expect. 
+
+Datasets:
+- 2024tb5_all_forms_inter_data.dta (2024 data)
+- thrive_by_five_20230830.dta (2021 data)
+
+
+
+    Generate Cohen’s d charts for total and domain ELOM scores by province using the 2021 Index data (same as you did for the 2024 Index). We want to do this first to exclude assessor bias as a reason for changes over time.
+    Re-examine the province-level number lines for total (and domain) ELOM scores in 2024 for any clustering of children either immediately below or above each of the two ELOM cutoffs. Colin and I discussed this and cutoffs are arbitrary by nature, which is problematic, but we need them for progress tracking and policy purposes.
+        Explore what happens to the percentage of children on track if the cutoffs are changed (let’s start by reducing each cutoff by 2 points, Colin’s suggested this number).
+         Back out which cutoff value would give WC 65% of children on track in 2024 (it is enough to do this for WC, at least to start with).
+    Check the percentage of children in each of the seven fee groups on track for ELOM in 2021 and 2024. Basic table. Will need to generate the 2024 Index fee group variable for the 2021 sample. Will ask for Jesal’s Stata script for you to lift the syntax from.
+        Deflate fees using CPI
+    Match each ELP's ward in the 2021 and 2024 data to the SAIMD deprivation index. 
+        Investigate how the WC sample's levels of deprivation changed between 2021 and 2024.
+        Investigate how WC sample's levels of deprivation differs to other provinces and how this difference changed between 2021 and 2024. 
+    2024 Index checks. 
+        Compare for each province, the percentage of children in fee groups 6 (Q5 Low) and 7 (Q5 High) on track for ELOM against the corresponding national ELOM averages. Basic table.
+        Examine ELOM task orientation outcomes by province, total and by item. Basic table.
+        Examine ELP refusals to participate in the study by province and quintile. Basic table.
+    Investigate evidence for assessor bias comparing ELOM items with low susceptibility to bias to items with high susceptibility to bias/misinterpretation:
+        Check with Brinthia and/or Liz which items have high vs low susceptibility. 
+        If we see WC's scores for items with low susceptibility for bias are more in line with expectations than items with high susceptibility for bias, this is evidence that WC's anomalous scores are due to assessor bias. 
+    Use PSM to match children, by province, in the 2021 sample to children in the 2024 sample. Alicia and Greg used entropy balancing to match children between 2021 and 2024, but we can do this using a different approach and a modified set of covariates. For this, can adapt Jesa’s Stata scripts used for non-enrolled v. enrolled paper.
+    Check the ELP overlap between the 2021 and 2024 Index datasets using GPS coordinates (from ELOM form I think as, for example, some principal interviews were conducted over the phone). Only for provinces that have 30+ of the same ELPs in 2021 and 2024, compare unweighted child outcomes (ELOM, growth, SEF). This was Colin’s idea, it is a good one if there is sufficient overlap.

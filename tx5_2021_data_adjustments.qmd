@@ -1,0 +1,256 @@
+---
+title: "Thrive by Five Adjustments for 2021-2024 Comparison"
+author: "Tyryn Carnegie"
+date: last-modified
+format:
+  html:
+    theme: lumen
+    code-fold: true
+    embed-resources: true    
+    highlight-style: tango
+    toc: true
+    toc-depth: 5
+    number-sections: false
+    anchor-sections: false
+execute:
+  warning: false
+---
+
+In the doc "Thrive by Five 2024 - Province score investigation" we found there to be assessor bias in the 2021 Thrive data. In this document we'll be incorporating findings from that document to adjust the 2021 and 2024 datasets so that they are comparable. The steps are as follows:
+
+1. Remove assessor 2681 from the 2021 dataset, others may need to be removed too. 
+2. Readjust the all outliers' scores (identified via Cohen's D) using mixed-effects model approach, using the assessor random effect coefficients to adjust domain scores. 
+3. In the 2024 data, remove all ELPs with fewer than 6 children enrolled in the 4-year old age group.
+
+After the above steps we then estimate the proportion of children On Track in 2021 and 2024. We then implement ...
+
+### Set up
+
+
+```{r}
+pacman::p_load(
+  dplyr,
+  ggplot2,
+  tidyr,
+  lubridate,
+  stringr,
+  haven,
+  scales,
+  lme4,
+  lmerTest,
+  glmmTMB,
+  flextable,
+  leaflet,
+  elomtools,
+  skimr
+)
+source("functions.R")
+# 2021 data --------------------------------------------------------------------
+tb5_2021 <- read_dta("data/thrive_by_five_20230830.dta") #%>% # Merged with the ECD census to get missing fee values
+
+# 2024 data --------------------------------------------------------------------
+tb5_2024 <- read_dta("data/2024tb5_all_forms_inter_data.dta") #%>% 
+  # Generate variables to align with functions 
+
+# Get the id_enumerator variable from an earlier dataset
+tb5_2024_id_enumerator  <- read_dta("data/tb5_2024_elom_elp_client.dta") %>% 
+  select(id_child, date, id_enumerator)
+tb5_2024 <- tb5_2024 %>% 
+  left_join(tb5_2024_id_enumerator, by = join_by(id_child))
+
+# Generate new fee variable
+tb5_2021 <- tb5_2021 %>% 
+  mutate(fees_amount = ifelse(fees==0, 0, fees_amount)) %>% 
+  mutate(fees_amount_deflated =  fees_amount*1.089) 
+
+# Generate a fee group variable according to the 2024 cuts
+tb5_2021 <- tb5_2021 %>% 
+  mutate(n_pri_fee_group7 = case_when(
+    fees_amount_deflated<=60 ~ 1, # These thresholds were taken from the 2024 data
+    fees_amount_deflated>60 & fees_amount_deflated<=120 ~ 2,
+    fees_amount_deflated>120 & fees_amount_deflated<=240 ~ 3,
+    fees_amount_deflated>240 & fees_amount_deflated<=350 ~ 4,
+    fees_amount_deflated>350 & fees_amount_deflated<=800 ~ 5,
+    fees_amount_deflated>800 & fees_amount_deflated<=1690 ~ 6,
+    fees_amount_deflated>1690 ~ 7,
+    TRUE ~  NA
+  ))
+
+
+```
+
+
+# Remove problematic assessors
+
+Here we remove assessors that clearly assessed children incorrectly in the 2021 sample. Referring to the other document the following assessors were identified:
+
+- 2681
+
+There are arguably others too. There are several assessors who scored exactly the same way on every assessment for certain items but weren't Cohen's D outliers. These include:
+
+- 344
+- 351
+- 1732
+
+These assessors should arguably be dropped ahead of 2681 as these assessors will not see their scores adjusted as per the Cohen's D outlier identification approach. Or we should at least also have their domain scores imputed too? 
+
+```{r, echo=TRUE}
+tb5_2021 <- tb5_2021 %>% 
+  filter(id_enumerator!="2681")
+
+``` 
+
+
+# Identify problematic assessors via Cohen's D
+
+Like with the doc "Thrive by Five 2024 - Province score investigation" I highlight assessors in the 2021 sample whose average ELOM scores sit more than 2 standard deviations from the mean. This time, however, we're using a dataset that has dropping assessor 2681. 
+
+```{r}
+#| label: fig-2021-Cohens-D
+#| fig-cap: "2021 Cohen's D outliers"
+#| fig-height: 10
+#| fig-cap-location: top
+
+plot_enumerator_cohens_d(tb5_2021, score_var = total_elom)
+
+``` 
+
+
+# Impute domain scores of problematic assessors
+
+
+```{r}
+outliers <- c("2762", "2669", " 571","2976", "2685", " 2796")
+elom_long3 <- tb5_2021 %>%
+  # Coerce to the same variable names as Colin's code
+  select(id_child=child_id, id_enumerator,elom_domain_1=domain_1, elom_domain_2=domain_2, elom_domain_3=domain_3, elom_domain_4=domain_4, elom_domain_5=domain_5, elom_child_age=child_age, elom_child_sex=child_gender, n_prov_fee_quintile_rev=n_pri_fee_group7) %>% 
+  pivot_longer(
+    cols       = c(starts_with("elom_domain_"), -contains("cuts")),
+    names_to   = "domain", 
+    values_to  = "domain_score"
+  ) 
+
+# Fit the mixed-effects model
+#    random intercepts for child, domain, enumerator.
+fit <- lmer(
+  domain_score ~ elom_child_age + elom_child_sex + n_prov_fee_quintile_rev +
+    (1 | id_child) +         # random intercept for child
+    (1 | domain) +           # random intercept for domain
+    (1 | id_enumerator),     # random intercept for enumerator
+  data = elom_long3
+)
+# summary(fit)
+
+# Identify problematic assessors
+prob_enums <- outliers # There are 7
+
+
+re_enum <- ranef(fit)$id_enumerator[["(Intercept)"]]
+
+# Convert to a data frame with enumerator ID and the random intercept
+df_enum <- data.frame(
+  id_enumerator = rownames(ranef(fit)$id_enumerator),
+  enum_re       = re_enum
+)
+
+elom_long3 <- elom_long3 %>%
+  mutate(id_enumerator = as.character(id_enumerator)) %>% 
+  left_join(df_enum, by = "id_enumerator") %>%
+  # if some enumerators are missing in ranef (possible if data is incomplete),
+  # coalesce them to 0
+  mutate(enum_re = coalesce(enum_re, 0))
+
+elom_long3 <- elom_long3 %>%
+  mutate(
+    # If enumerator is in the problem list, subtract their random effect.
+    # If not in problem list, do no correction to raw score.
+    domain_score_adj = if_else(
+      id_enumerator %in% prob_enums,
+      domain_score - enum_re,   # remove enumerator effect
+      domain_score             # keep as-is
+    )
+  )
+
+# Threshold adjusted domain scores at 0 and 20
+elom_long3 <-  
+  elom_long3 %>% 
+    mutate (domain_score_adj = case_when(
+      domain_score_adj < 0 ~ 0,
+      domain_score_adj > 20 ~ 20,
+      .default = domain_score_adj
+    ))
+
+# Reshape the data
+elom_adj_wide <- elom_long3 %>% 
+  select(id_child, domain, child_age=elom_child_age, domain_score_adj) %>% 
+  pivot_wider(id_cols=c(id_child, child_age), names_from=domain, values_from = domain_score_adj) %>% 
+  mutate(score = elom_domain_1 + elom_domain_2 + elom_domain_3 + elom_domain_4 + elom_domain_5) %>% 
+  rename(domain_1=elom_domain_1, domain_2=elom_domain_2, domain_3=elom_domain_3, domain_4=elom_domain_4, domain_5=elom_domain_5)
+
+elom_adj_wide <- fn_age_group(elom_adj_wide, tool_in = "4and5")
+
+# Regenerate total cuts
+elom_adj_wide <- apply_domain_categories(elom_adj_wide, tool_in="4and5", "1")
+elom_adj_wide <- apply_domain_categories(elom_adj_wide, tool_in="4and5", "2")
+elom_adj_wide <- apply_domain_categories(elom_adj_wide, tool_in="4and5", "3")
+elom_adj_wide <- apply_domain_categories(elom_adj_wide, tool_in="4and5", "4")
+elom_adj_wide <- apply_domain_categories(elom_adj_wide, tool_in="4and5", "5")
+elom_adj_wide <- apply_domain_categories(elom_adj_wide, tool_in="4and5", "score")
+
+elom_adj_wide <- elom_adj_wide %>% 
+  select(id_child, domain_1:score, domain_1_cuts:total_elom_cuts) %>% 
+    mutate(across(
+    ends_with("_cuts"),
+    ~ factor(
+        dplyr::recode(as.character(.),
+          "1" = "Falling Far Behind",
+          "2" = "Falling Behind",
+          "3" = "On Track",
+          .default = NA_character_
+        ),
+        levels = c("Falling Far Behind", "Falling Behind", "On Track"),
+        ordered = TRUE
+      )
+  )) %>%
+  rename_with(~ paste0(.x, "_adj"), domain_1:total_elom_cuts)
+
+
+# Merge this into the 2021 data
+tb5_2021 <- tb5_2021 %>% 
+  left_join(elom_adj_wide, by=join_by("child_id"=="id_child"))
+
+
+```
+
+
+# Remove ELPs with fewer than 6 children aged 4-5 in the 2024 sample
+
+In the 2021 Thrive by Five only ELPs with 6 or more children were included in the study. In order to make the samples more comparable, here we remove ELPs with fewer than 6 children from the 2024 sample. 
+
+Here we use the variable count_month_total from the 2024 sampling form - "How many of the enrolled children were born between X and Y". This gives the number enrolled within the valid age range. This is probably different to how this was done in 2021 (e.g., instead asking "How many children are 4 years old?")
+
+```{r}
+# Using the variable count_month_total from the sampling form to get the size of the ELP with eligible children
+sample_size <- read_dta("data/tb5_2024_sample_client.dta") %>% 
+  select(id_ecd, n_children, count_children, count_month_total,count_year, n_children)
+
+
+tb5_2024_filtered <- tb5_2024 %>% 
+  left_join(sample_size) %>% 
+  filter(count_month_total>=6)
+
+
+
+```
+
+Taking this step reduces the 2024 sample size substantially from `r nrow(tb5_2024)` to `r nrow(tb5_2024_filtered)`.
+
+
+# Entropy balancing to mathc
+
+```{r}
+
+
+```
+
+

@@ -1,0 +1,525 @@
+---
+title: "Language investigation"
+author: "Tyryn Carnegie"
+date: last-modified
+format:
+  html:
+    theme: lumen
+    code-fold: true
+    embed-resources: true    
+    highlight-style: tango
+    toc: true
+    toc-depth: 5
+    number-sections: false
+    anchor-sections: false
+execute:
+  warning: false
+---
+
+```{r}
+pacman::p_load(
+  dplyr,
+  cem,
+  ggplot2,
+  tidyr,
+  lubridate,
+  stringr,
+  haven,
+  scales,
+  lme4,
+  purrr,
+  lmerTest,
+  glmmTMB,
+  flextable,
+  leaflet,
+  elomtools,
+  survey,
+  skimr,
+  WeightIt,
+  cobalt
+)
+source("functions.R")
+
+# 2021 data --------------------------------------------------------------------
+tb5_2021 <- read_dta("data/thrive_by_five_20230830.dta") #%>% # Merged with the ECD census to get missing fee values
+
+# 2024 data --------------------------------------------------------------------
+tb5_2024 <- read_dta("data/2024tb5_all_forms_inter_data.dta") #%>% 
+  # Generate variables to align with functions 
+
+# Get the id_enumerator variable from an earlier dataset
+tb5_2024_id_enumerator  <- read_dta("data/tb5_2024_elom_elp_client.dta") %>% 
+  select(id_child, date, id_enumerator)
+tb5_2024 <- tb5_2024 %>% 
+  left_join(tb5_2024_id_enumerator, by = join_by(id_child))
+
+
+``` 
+
+
+# The proportion of assessments where the ELOM assessment language matches the ELOM form's child home language
+The table below shows the proportion of assessment where the ELOM assessment language variable (elom_language_assessment) matches the child home language captured on the ELOM form (elom_language_child). While all provinces are either 100% or near 100%, its curious as to why they aren't all 100%. We would expect language mismatches to have been dropped. 
+
+```{r}
+tb5_2024_lang_elom <- tb5_2024 %>%
+  transmute(
+    elom_prov,
+    assess = as.integer(zap_labels(elom_language_assessment)),
+    child  = as.character(zap_labels(elom_language_child))
+  ) %>%
+  mutate(
+    # normalize spacing and pad with spaces to make whole-number word-boundary matches easy
+    child_norm = paste0(" ", str_squish(child), " "),
+    language_match = if_else(
+      !is.na(assess) & !is.na(child_norm) &
+        str_detect(child_norm, paste0("\\b", assess, "\\b")),
+      1L, 0L, missing = 0L
+    )
+  ) %>%
+  select(elom_prov, elom_language_assessment = assess,
+         elom_language_child = child, language_match)
+
+tbl <- tb5_2024_lang_elom %>% 
+  # mutate(language_match = as.integer(as.character(elom_language_assessment) ==
+  #                                    as.character(cg_language_home))) %>% 
+  # filter(!is.na(cg_language_home), cg_language_home != "", cg_language_home != "None") %>% 
+  group_by(elom_prov) %>%
+  summarise(prop_language_match = round(100 * mean(language_match), 1),
+            n_language = n(), .groups = "drop") %>% 
+  rename(
+    Province = elom_prov,
+    # `Assessment language` = elom_language_assessment,
+    `% ELOM home languages matches assessment language` = prop_language_match,
+    N = n_language
+  ) 
+
+tbl %>% 
+  flextable()
+
+```
+
+# The proportion assessed where the assessment language matches the MAIN home language in the PCG form
+
+The table below shows the % of assessed children for whom the assessment language matches the language the child mostly speaks at home (as per the PCG form, cg_language_home). 
+
+The table shows the language outcomes for the 2024 sample only. The table's results are notable for:
+
+- 25% of Eastern Cape assessments were conducted in English when the child mostly spoke another language at home
+- Gauteng's result were striking. 39% of Gauteng assessments were conducted in English when the child mostly spoke another language at home. Similarly for Sesotho for assessments (24%), Setswana (29%), Sepedi (37%).
+- 54% of Northern Cape assessments were conducted in English when the child mostly spoke another language at home. 
+- 41% of North West assessments were conducted in English when the child mostly spoke another language at home. 
+- 22% of Western Cape assessments were conducted in English when the child mostly spoke another language at home. 
+
+```{r}
+#| label: tbl-lang-match
+#| tbl-cap: "The proportion assessed where the assessment language matches the main home language"
+
+lang_cols <- paste0("cg_languages_", 1:11)
+
+tb5_2024_lang <- tb5_2024 %>% 
+  select(id_child, elom_prov, cg_language_home, elom_language_assessment) %>% 
+  as_factor() 
+
+tb5_2024_home_langs <- tb5_2024 %>% 
+  select(id_child, all_of(lang_cols)) %>% 
+  pivot_longer(
+    cols = starts_with("cg_languages_"),
+    names_to = "name",
+    values_to = "value"
+  ) %>% 
+  filter(as.integer(value) == 1) %>% 
+  group_by(id_child) %>% 
+  filter(n() == 1) %>% 
+  ungroup() %>% 
+  mutate(cg_language_coerce = as.integer(str_remove(name, "^cg_languages_")),
+         cg_language_coerce = factor(cg_language_coerce, levels=c(1:11),
+                                     labels = c("Afrikaans", 
+                                                "English",
+                                                "isiNdebele",
+                                                "isiXhosa",
+                                                "isiZulu",
+                                                "Sesotho",
+                                                "Sepedi",
+                                                "Setswana",
+                                                "siSwati", 
+                                                "Tshivenda",
+                                                "Xitsonga"))) %>% 
+  select(id_child, cg_language_coerce)
+
+tb5_2024_lang <- tb5_2024_lang %>%
+  left_join(tb5_2024_home_langs, by = "id_child") %>%
+  mutate(cg_language_coerce = factor(cg_language_coerce,
+                                     levels = levels(cg_language_home)),
+         cg_language_home = if_else(is.na(cg_language_home),
+                                    cg_language_coerce, cg_language_home)) %>%
+  select(-cg_language_coerce) %>% 
+  mutate(elom_language_assessment =
+           forcats::fct_recode(elom_language_assessment,
+                      "Sepedi" = "Sesotho se Leboa (Sepedi)"))
+
+
+# build the summary table
+tbl <- tb5_2024_lang %>% 
+  mutate(language_match = as.integer(as.character(elom_language_assessment) ==
+                                     as.character(cg_language_home))) %>% 
+  filter(!is.na(cg_language_home), cg_language_home != "", cg_language_home != "None") %>% 
+  group_by(elom_prov, elom_language_assessment) %>% 
+  summarise(prop_language_match = round(100 * mean(language_match), 1),
+            n_language = n(), .groups = "drop") %>% 
+  rename(
+    Province = elom_prov,
+    `Assessment language` = elom_language_assessment,
+    `% most used home language matches assessment language` = prop_language_match,
+    N = n_language
+  )
+
+# color palette: low values = red, high = white 
+pal <- col_numeric(
+  palette = c("#b2182b", "#fddbc7", "#ffffff"), # deep red → light red → white
+  domain  = c(0, 100)
+)
+
+# build flextable
+ft <- flextable(tbl) %>%
+  colformat_num(j = "% most used home language matches assessment language",
+                digits = 1, suffix = "%")
+
+# apply background gradient to that column
+col_vals <- tbl$`% most used home language matches assessment language`
+ft <- bg(
+  ft,
+  j = "% most used home language matches assessment language",
+  i = seq_len(nrow(tbl)),
+  bg = pal(col_vals)
+)
+
+# optional: improve contrast for very low values (white text on dark red)
+ft <- color(
+  ft,
+  j = "% most used home language matches assessment language",
+  i = which(col_vals <= 25),  # threshold is your call
+  color = "white"
+) %>%
+  autofit()
+
+ft
+
+```
+
+## The impact of language mismatch on ELOM outcomes
+To explore this finding more, here we compare the relationship between Total ELOM scores and not having the assessment conducted in the child's home language. Below we use a simple mixed effects model where ECD centre, enumeration area and stratum are used as random effects. Fixed effects include child age, child sex, height-for-age, ELP fee level, and lastly an indicator saying whether the assessment was conducted in the most spoken language at the child's home. 
+
+**The table below shows that when the language of assessment matches the language most spoken at home, the child on average 1.12 points more on average.** 
+
+```{r}
+library(lme4)
+library(sjPlot)
+
+tb5x <- tb5_2024 %>%
+  left_join(tb5_2024_lang , by = "id_child") %>%
+  as_factor() %>% 
+  mutate(
+    # language_match
+   language_match = as.integer(as.character(elom_language_assessment.y) ==
+                                     as.character(cg_language_home.y)),
+    # outcome: 1 = On Track
+    ontrack = as.integer(n_elom_total_cuts == "On Track"),
+    # tidy covariates
+    elom_child_sex = as.factor(elom_child_sex),
+    n_pri_fee_group7 = as.factor(n_pri_fee_group7)
+  )
+
+mod <- lmer(
+  n_elom_total_score ~ elom_child_age + elom_child_sex + n_elom_zhfa + n_pri_fee_group7 +
+    language_match +
+    (1 | id_ecd) + (1 | id_ea) + (1 | stratum),
+  data = tb5x,
+  # family = binomial(link = "logit") #,
+  # control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 1e5))
+)
+
+
+tab_model(
+  mod,
+  dv.labels  = "ELOM total score",
+  pred.labels = c(
+    "(Intercept)",
+    "Child age (months)"        = "elom_child_age",
+    "Girl (ref: Boy)"           = "elom_child_sexGirls",
+    "Height-for-age (z)"        = "n_elom_zhfa",
+    "Fee group (factor)"        = "n_pri_fee_group7",
+    "Assessment language = home language" = "language_match"
+  ),
+  # show.ci   = TRUE,
+  show.icc  = TRUE,             # intraclass correlation
+  show.r2   = TRUE,             
+  show.se   = TRUE,
+  show.re.var = TRUE            # random effect variances
+)
+```
+
+
+
+## Monolingual vs Multilingual children: The proportion assessed where the assessment language matches main home language
+
+Here we do the same as above but disaggregate between monolingual and multilingual children. As expected, the percentage of matches is lower among multilingual children than monolingual children. Among multilingual children the overall language match rate is 76% compared to 93% for monolingual children. 
+
+```{r}
+#| label: tbl-lang-match-multi
+#| tbl-cap: "Monolingual vs Multilingual children: The proportion assessed where the assessment langauge maches the main home language"
+
+df_multilingual <- tb5_2024 %>%
+  rowwise() %>%
+  mutate(lang_count = sum(c_across(all_of(lang_cols)), na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(multilingual = ifelse(lang_count > 1, 1, 0)) %>%
+  select(id_child, multilingual)
+
+# 2) join and compute language match
+tb5_2024_lang_all <- tb5_2024_lang %>%
+  left_join(df_multilingual, by = "id_child") %>%
+  # if some id_child didn't match, assign them monolingual (or NA) as you prefer:
+  mutate(multilingual = replace_na(multilingual, NA))
+
+# 3) summarise by province, assessment language and multilingual flag
+summary_long <- tb5_2024_lang_all %>%
+  mutate(language_match = as.integer(
+    as.character(elom_language_assessment) == as.character(cg_language_home)
+  )) %>%
+  filter(!is.na(cg_language_home), cg_language_home != "", cg_language_home != "None") %>%
+  group_by(elom_prov, elom_language_assessment, multilingual) %>%
+  summarise(
+    prop_language_match = round(100 * mean(language_match, na.rm = TRUE), 1),
+    n_language = n(),
+    .groups = "drop"
+  )
+
+# 4) pivot wider so multilingual=1 and multilingual=0 become separate columns
+tbl_wide <- summary_long %>%
+  pivot_wider(
+    names_from = multilingual,
+    values_from = c(prop_language_match, n_language),
+    names_glue = "{.value}_{multilingual}",
+    values_fill = list(prop_language_match = NA_real_, n_language = 0)
+  ) %>%
+  rename(
+    Province = elom_prov,
+    `Assessment language` = elom_language_assessment,
+    `Multilingual: % most used home language matches assessment language` = prop_language_match_1,
+    `Monolingual: % most used language matches assessment language`     = prop_language_match_0,
+    `Multilingual: N` = n_language_1,
+    `Monolingual: N`  = n_language_0
+  )
+
+# 5) palette and flextable styling (apply to both percent columns)
+pal <- col_numeric(
+  palette = c("#b2182b", "#fddbc7", "#ffffff"),
+  domain  = c(0, 100)
+)
+
+# build flextable
+ft <- flextable(tbl_wide) %>%
+  # format percent columns
+  colformat_num(
+    j = c("Multilingual: % most used home language matches assessment language",
+          "Monolingual: % most used language matches assessment language"),
+    digits = 1, suffix = "%"
+  ) %>%
+  # format N columns as integers
+  colformat_num(j = c("Multilingual: N", "Monolingual: N"), digits = 0, na_str = "0")
+
+# Apply background gradient to both percent columns
+for (col_name in c("Multilingual: % most used home language matches assessment language",
+                   "Monolingual: % most used language matches assessment language")) {
+  col_vals <- tbl_wide[[col_name]]
+  ft <- bg(
+    ft,
+    j = col_name,
+    i = seq_len(nrow(tbl_wide)),
+    bg = pal(col_vals)
+  ) %>%
+    color(
+      j = col_name,
+      i = which(!is.na(col_vals) & col_vals <= 25),
+      color = "white"
+    )
+}
+
+ft <- ft %>% autofit()
+
+# ft is the resulting flextable
+ft
+
+```
+
+
+### Monolingual vs multilingual: The impact of language mismatch on ELOM outcomes
+
+Here we add an interaction effect to the earlier mixed-effects model to see whether the impact of a language mismatch differs when the child is monolingual vs multilingual. The hypothesis tested here is that multilingual children would be less affected because they are more likely to be at least familiar with the assessment language compared to monolingual children. Note though that the sample of monolingual children is rather small (10% of PCG sample). 
+
+The model's results now also show that multilingual children, on average, score **better** than monolingual children and that the impact of an assessment language-main home language mismatch **is not** statistically significantly different between monolingual and multilingual children (though the coefficient does tentatively suggest that the affect is greater on monolingual children compared to multilingual children). 
+
+```{r}
+
+tb5x <- tb5_2024 %>%
+  left_join(tb5_2024_lang, by = "id_child") %>%
+  left_join(df_multilingual, by = "id_child") %>%
+  as_factor() %>%
+  mutate(
+    # language_match (1 = match, 0 = not match)
+    language_match = as.integer(
+      as.character(elom_language_assessment.y) == as.character(cg_language_home.y)
+    ),
+    # outcome: 1 = On Track
+    ontrack = as.integer(n_elom_total_cuts == "On Track"),
+    # tidy covariates
+    elom_child_sex = as.factor(elom_child_sex),
+    n_pri_fee_group7 = as.factor(n_pri_fee_group7)
+  )
+
+# Model with interaction
+mod <- lmer(
+  n_elom_total_score ~ elom_child_age + elom_child_sex + n_elom_zhfa + n_pri_fee_group7 +
+    language_match * multilingual +
+    (1 | id_ecd) + (1 | id_ea) + (1 | stratum),
+  data = tb5x
+  # family = binomial(link = "logit") # if outcome were binary
+  # control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 1e5))
+)
+
+# Table output
+tab_model(
+  mod,
+  dv.labels  = "ELOM total score",
+  pred.labels = c(
+    "(Intercept)",
+    "Child age (months)"         = "elom_child_age",
+    "Girl (ref: Boy)"            = "elom_child_sexGirls",
+    "Height-for-age (z)"         = "n_elom_zhfa",
+    "Fee group (factor)"         = "n_pri_fee_group7",
+    "Assessment language = home language" = "language_match",
+    "Multilingual"               = "multilingual",
+    "Language match × Multilingual" = "language_match:multilingual"
+  ),
+  show.icc   = TRUE,
+  show.r2    = TRUE,             
+  show.se    = TRUE,
+  show.re.var = TRUE
+)
+
+
+```
+
+# The proportion assessed where the assessment language matches ANY home language in the PCG form
+The table below shows the % of assessed children for whom the assessment language matches any language the child speaks at home (as per the PCG form, cg_language_home). 
+
+```{r}
+#| label: tbl-lang-match-any
+#| tbl-cap: "The proportion assessed where the assessment language matches any home language"
+
+tb5_2024_lang <- tb5_2024 %>% 
+  select(id_child, elom_prov, cg_language_home, elom_language_assessment) %>% 
+  as_factor() 
+lang_cols <- paste0("cg_languages_", 1:11)
+
+tb5_2024_home_langs <- tb5_2024 %>%
+  select(id_child, all_of(lang_cols)) %>%
+  pivot_longer(
+    cols = starts_with("cg_languages_"),
+    names_to = "name",
+    values_to = "value"
+  ) %>%
+  # robustly coerce value -> integer 0/1
+  mutate(value = case_when(
+    is.logical(value) ~ as.integer(value),
+    is.numeric(value) ~ as.integer(value),
+    TRUE               ~ as.integer(as.character(value))
+  )) %>%
+  filter(!is.na(value) & value == 1) %>%
+  group_by(id_child) %>%
+  # create an index for each selected language (1,2,3, ...)
+  mutate(lang_index = row_number()) %>%
+  ungroup() %>%
+  # extract numeric code from the column name and map to language labels
+  mutate(
+    cg_lang_code = as.integer(str_remove(name, "^cg_languages_")),
+    cg_language_coerce = factor(
+      cg_lang_code,
+      levels = 1:11,
+      labels = c("Afrikaans", "English", "isiNdebele", "isiXhosa", "isiZulu",
+                 "Sesotho", "Sepedi", "Setswana", "siSwati", "Tshivenda", "Xitsonga")
+    )
+  ) %>%
+  select(id_child, lang_index, cg_language_coerce) %>%
+  pivot_wider(
+    id_cols = id_child,
+    names_from = lang_index,
+    names_prefix = "cg_language_",
+    values_from = cg_language_coerce,
+    values_fill = NA_character_
+  ) %>% 
+  rowwise() %>%
+  mutate(cg_language_home_collapse = paste(na.omit(c_across(starts_with("cg_language_"))), collapse = " ")) %>%
+  ungroup() %>% 
+  select(id_child, cg_language_home_collapse)
+
+tb5_2024_lang <- tb5_2024_lang %>%
+  left_join(tb5_2024_home_langs, by = "id_child") %>%
+  # mutate(cg_language_coerce = factor(cg_language_coerce,
+  #                                    levels = levels(cg_language_home)),
+  #        cg_language_home = if_else(is.na(cg_language_home),
+  #                                   cg_language_coerce, cg_language_home)) %>%
+  # select(-cg_language_coerce) %>% 
+  mutate(elom_language_assessment =
+           forcats::fct_recode(elom_language_assessment,
+                      "Sepedi" = "Sesotho se Leboa (Sepedi)"))
+
+
+# build the summary table
+tbl <- tb5_2024_lang %>% 
+  mutate(language_match = as.integer(as.character(elom_language_assessment) %in%
+                                     as.character(cg_language_home_collapse))) %>% 
+  filter(!is.na(cg_language_home_collapse), cg_language_home_collapse != "", cg_language_home_collapse != "None") %>% 
+  group_by(elom_prov, elom_language_assessment) %>% 
+  summarise(prop_language_match = round(100 * mean(language_match), 1),
+            n_language = n(), .groups = "drop") %>% 
+  rename(
+    Province = elom_prov,
+    `Assessment language` = elom_language_assessment,
+    `% most used home language matches assessment language` = prop_language_match,
+    N = n_language
+  )
+
+# color palette: low values = red, high = white 
+pal <- col_numeric(
+  palette = c("#b2182b", "#fddbc7", "#ffffff"), # deep red → light red → white
+  domain  = c(0, 100)
+)
+
+# build flextable
+ft <- flextable(tbl) %>%
+  colformat_num(j = "% most used home language matches assessment language",
+                digits = 1, suffix = "%")
+
+# apply background gradient to that column
+col_vals <- tbl$`% most used home language matches assessment language`
+ft <- bg(
+  ft,
+  j = "% most used home language matches assessment language",
+  i = seq_len(nrow(tbl)),
+  bg = pal(col_vals)
+)
+
+# optional: improve contrast for very low values (white text on dark red)
+ft <- color(
+  ft,
+  j = "% most used home language matches assessment language",
+  i = which(col_vals <= 25),  # threshold is your call
+  color = "white"
+) %>%
+  autofit()
+
+ft
+
+
+```

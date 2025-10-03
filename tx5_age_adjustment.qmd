@@ -1,0 +1,1203 @@
+---
+title: "Child age matching"
+author: "Tyryn Carnegie"
+date: last-modified
+format:
+  html:
+    theme: lumen
+    code-fold: true
+    embed-resources: true    
+    highlight-style: tango
+    toc: true
+    toc-depth: 5
+    number-sections: false
+    anchor-sections: false
+execute:
+  warning: false
+---
+
+
+```{r}
+pacman::p_load(
+  dplyr,
+  cem,
+  ggplot2,
+  tidyr,
+  lubridate,
+  stringr,
+  haven,
+  scales,
+  lme4,
+  purrr,
+  lmerTest,
+  glmmTMB,
+  flextable,
+  leaflet,
+  elomtools,
+  survey,
+  skimr,
+  WeightIt,
+  cobalt
+)
+source("functions.R")
+
+# 2021 data --------------------------------------------------------------------
+tb5_2021 <- read_dta("data/thrive_by_five_20230830.dta") #%>% # Merged with the ECD census to get missing fee values
+
+# 2024 data --------------------------------------------------------------------
+tb5_2024 <- read_dta("data/2024tb5_all_forms_inter_data.dta") #%>% 
+  # Generate variables to align with functions 
+
+# Get the id_enumerator variable from an earlier dataset
+tb5_2024_id_enumerator  <- read_dta("data/tb5_2024_elom_elp_client.dta") %>% 
+  select(id_child, date, id_enumerator)
+tb5_2024 <- tb5_2024 %>% 
+  left_join(tb5_2024_id_enumerator, by = join_by(id_child))
+
+```
+
+# Get the datasets equivalent
+
+```{r}
+# Generate new fee variable
+tb5_2021 <- tb5_2021 %>% 
+  mutate(fees_amount = ifelse(fees==0, 0, fees_amount)) %>% 
+  mutate(fees_amount_deflated =  fees_amount*1.089) 
+
+# Generate a fee group variable according to the 2024 cuts
+tb5_2021 <- tb5_2021 %>% 
+  mutate(n_pri_fee_group7 = case_when(
+    fees_amount_deflated<=60 ~ 1, # These thresholds were taken from the 2024 data
+    fees_amount_deflated>60 & fees_amount_deflated<=120 ~ 2,
+    fees_amount_deflated>120 & fees_amount_deflated<=240 ~ 3,
+    fees_amount_deflated>240 & fees_amount_deflated<=350 ~ 4,
+    fees_amount_deflated>350 & fees_amount_deflated<=800 ~ 5,
+    fees_amount_deflated>800 & fees_amount_deflated<=1690 ~ 6,
+    fees_amount_deflated>1690 ~ 7,
+    TRUE ~  NA
+  ))
+
+tb5_2021_equivalent <- tb5_2021 %>% 
+  select(id_enumerator, id_child=child_id,
+         n_elom_total_score=total_elom, n_elom_domain_1_score=domain_1, n_elom_domain_2_score=domain_2, n_elom_domain_3_score=domain_3, n_elom_domain_4_score=domain_4, n_elom_domain_5_score=domain_5, 
+         n_elom_total_cuts=total_elom_cuts,
+         weight_child=sample_wgt,
+         elom_child_sex=child_gender,
+         elom_child_age=child_age,
+         elom_prov=prov_geo,
+         elom_language_assessment=language_assessment,
+         cg_education=education,
+         n_pri_fee_group7) %>% 
+  as_factor() %>% 
+  mutate(n_pri_fee_group7 = as.factor(n_pri_fee_group7)) %>% 
+  mutate(year=2021)
+
+tb5_2021_equivalent <- tb5_2021_equivalent %>%
+  mutate(elom_child_sex = forcats::fct_recode(elom_child_sex,
+                                              "Boys"  = "Male",
+                                              "Girls" = "Female"))
+
+tb5 <- tb5_2024 %>% 
+  select(id_enumerator, id_child, n_elom_total_score, n_elom_total_cuts,  n_elom_domain_1_score, n_elom_domain_2_score, n_elom_domain_3_score, n_elom_domain_4_score, n_elom_domain_5_score,  weight_child, elom_child_sex, elom_child_age, elom_prov, elom_language_assessment, cg_education, n_pri_fee_group7) %>% 
+  as_factor() %>% 
+  mutate(year=2024) 
+
+levels(tb5_2021_equivalent$n_pri_fee_group7) <- levels(tb5$n_pri_fee_group7)
+
+tb5 <- tb5 %>% 
+  bind_rows(tb5_2021_equivalent) %>% 
+  mutate(elom_child_age = floor(elom_child_age)) %>% 
+  mutate(elom_language_assessment = case_when(
+    elom_language_assessment=="Sesotho se Leboa (Sepedi)" ~ "Sepedi",
+    TRUE ~ elom_language_assessment
+  )) %>% 
+  filter(elom_prov!="") %>% 
+    mutate(
+    n_elom_total_cuts = recode(as.character(n_elom_total_cuts),
+      "On track"             = "On Track",
+      "Falling behind"       = "Falling Behind",
+      "Falling far behind"   = "Falling Far Behind",
+      .default = as.character(n_elom_total_cuts)
+    ),
+    n_elom_total_cuts = factor(n_elom_total_cuts,
+      levels = c("Falling Far Behind","Falling Behind","On Track"))
+  )
+
+
+```
+
+
+# Province summaries
+
+As requested by Gunilla, the below tables show summary statistics on each provinces samples for 2021 and 2024.
+
+Note that the 2021 fees have been inflation adjusted to 2024 levels using CPI figures and the estimates are survey weighted. 
+
+```{r}
+
+
+fn_summary_table <- function(dataframe, province="Eastern Cape"){ 
+  
+  
+df <- dataframe %>% 
+  filter(elom_prov==province) %>% 
+  filter(!is.na(weight_child))
+
+
+mean_age <- df %>%
+  filter(year %in% c(2021, 2024)) %>%
+  group_by(year) %>%
+  summarise(
+    value = weighted.mean(
+      as.numeric(elom_child_age),
+      as.numeric(weight_child),
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  ) %>%
+  mutate(value = round(value, 1)) %>% 
+  pivot_wider(names_from = year, values_from = value) %>% 
+  mutate(category = "Mean age") %>% 
+  relocate(category, everything())
+
+prop_gender <- df %>%
+  filter(year %in% c(2021, 2024)) %>%
+  group_by(year) %>%
+  summarise(
+    value = weighted.mean(
+      elom_child_sex=="Girls",
+      as.numeric(weight_child),
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  ) %>%
+  mutate(value = round(100*value, 1)) %>% 
+  pivot_wider(names_from = year, values_from = value) %>% 
+  mutate(category = "% girls") %>% 
+  relocate(category, everything())
+
+
+prop_language <- df %>%
+  filter(year %in% c(2021, 2024),
+         !is.na(elom_language_assessment),
+         elom_language_assessment != "") %>%
+  mutate(
+    weight_child = as.numeric(weight_child),              # safe for labelled
+    language = as.character(elom_language_assessment)     # clean label
+  ) %>%
+  group_by(year, language) %>%
+  summarise(
+    w_sum  = sum(weight_child, na.rm = TRUE),             # weighted count
+    N_unw  = n(),                                         # unweighted count
+    .groups = "drop_last"
+  ) %>%
+  group_by(year) %>%
+  mutate(
+    pct_weighted   = 100 * w_sum / sum(w_sum, na.rm = TRUE),
+  ) %>%
+  ungroup() %>%
+  transmute(
+    year,
+    language,
+    value   = round(pct_weighted, 1),
+  ) %>%
+  arrange(year, desc(value))  %>% 
+   pivot_wider(names_from = year, values_from = value) %>%  
+  mutate(category = "% assessment language")  %>% 
+  rename(subcategory=language) %>% 
+   relocate(category, everything())
+  
+    
+
+prop_fee_group <- df %>% 
+  filter(year %in% c(2021, 2024),
+         !is.na(n_pri_fee_group7),
+         n_pri_fee_group7 != "") %>%
+  mutate(
+    weight_child = as.numeric(weight_child),              # safe for labelled
+    language = as.character(n_pri_fee_group7)     # clean label
+  ) %>%
+  group_by(year, n_pri_fee_group7) %>%
+  summarise(
+    w_sum  = sum(weight_child, na.rm = TRUE),             # weighted count
+    N_unw  = n(),                                         # unweighted count
+    .groups = "drop_last"
+  ) %>%
+  group_by(year) %>%
+  mutate(
+    pct_weighted   = 100 * w_sum / sum(w_sum, na.rm = TRUE),
+  ) %>%
+  ungroup() %>%
+  transmute(
+    year,
+    n_pri_fee_group7,
+    value   = round(pct_weighted, 1),
+  ) %>%
+  arrange(year, desc(value)) %>% 
+   pivot_wider(names_from = year, values_from = value) %>%  
+  mutate(category = "% fee group")  %>% 
+  rename(subcategory=n_pri_fee_group7) %>% 
+   relocate(category, everything())
+    
+summary_table <- mean_age %>% 
+  bind_rows(prop_gender, prop_language, prop_fee_group) %>% 
+  select(category, subcategory, `2021`, `2024`) %>% 
+  flextable()
+    
+return(summary_table)
+  
+  
+  
+  
+ }
+
+    
+```
+
+::: {.panel-tabset}
+
+## Eastern Cape
+
+```{r}
+
+fn_summary_table(tb5, "Eastern Cape")
+```
+
+
+## Free State
+
+```{r}
+
+fn_summary_table(tb5, "Free State")
+```
+
+## Gauteng
+
+```{r}
+
+fn_summary_table(tb5, "Gauteng")
+```
+
+## KwaZulu-Natal
+
+```{r}
+
+fn_summary_table(tb5, "KwaZulu-Natal")
+```
+
+## Limpopo
+
+```{r}
+
+fn_summary_table(tb5, "Limpopo")
+```
+
+## Mpumalanga
+
+```{r}
+
+fn_summary_table(tb5, "Mpumalanga")
+```
+
+## North West
+
+```{r}
+
+fn_summary_table(tb5, "North West")
+```
+
+## Northern Cape
+
+```{r}
+
+fn_summary_table(tb5, "Northern Cape")
+```
+
+## Western Cape
+
+```{r}
+
+fn_summary_table(tb5, "Western Cape")
+```
+
+:::
+
+# Entropy balancing
+
+Here we ask what the 2024 outcomes would look like if the 2024 children had the same age/sex/fee/language distribution as 2021. 
+
+## Balancing variables
+
+I used the following variables for entropy balancing:
+
+- Child age
+- Child sex
+- Province (not for now)
+- Language of assessment
+- Fee group
+- Caregiver education (not for now)
+
+We use the above variables to adjust the original weighting variable, weight_child, to more closely match the 2021 sample. I chose the above variables because those were used by Jesal when she matched the 2024 enrolled and unenrolled samples, because they have a few missing values, and because I expect them to be important predictors of outcomes.
+
+Below shows the difference in distribution for the above variables:
+
+```{r}
+ggplot(tb5, aes(x = elom_child_age, fill = factor(year))) +
+  geom_density(alpha = 0.4) +
+  labs(title = "Distribution of Child Age by Year",
+       x = "Age (months)", fill = "Year") +
+  theme_minimal()
+
+# Child sex proportions
+tb5 %>%
+  count(year, elom_child_sex) %>%
+  group_by(year) %>%
+  mutate(prop = n / sum(n)) %>%
+  ggplot(aes(x = factor(year), y = prop, fill = elom_child_sex)) +
+  geom_col(position = "dodge") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Proportion of Boys vs Girls within Each Year",
+       x = "Year", y = "Percent", fill = "Sex") +
+  theme_minimal()
+
+# Language proportions
+tb5 %>%
+  count(year, elom_language_assessment) %>%
+  group_by(year) %>%
+  mutate(prop = n / sum(n)) %>%
+  ggplot(aes(x = factor(year), y = prop, fill = elom_language_assessment)) +
+  geom_col(position = "dodge") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Proportion of Languages within Each Year",
+       x = "Year", y = "Percent", fill = "Language") +
+  theme_minimal()
+
+# Fee group proportions
+tb5 %>%
+  count(year, n_pri_fee_group7) %>%
+  group_by(year) %>%
+  mutate(prop = n / sum(n)) %>%
+  ggplot(aes(x = factor(year), y = prop, fill = n_pri_fee_group7)) +
+  geom_col(position = "dodge") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Proportion of Fee Groups within Each Year",
+       x = "Year", y = "Percent", fill = "Fee group") +
+  theme_minimal()
+```
+
+
+## Run entropy balancing on age, sex, assessment language, and fee group
+
+When balancing the 2024 dataset to more closely match the 2021 sample's selected characteristics we'll conduct the balancing upon each province individually. This is because we want to make the provinces comparable between 2021 and 2024, not the country as a whole. 
+
+Note that we'll be adjusting the original sample weights - entropy balancing is done on top of the base weights. In certain categories there may be no data (for example no "q1 low" ELPs in the Western Cape's 2021 sample) in which case we'll collapse categories. 
+
+### Balance on selected variables
+
+Note that I had to drop the following because there were assessments with the following characteristics that appeared in 2021 but did not appear in 2024 (or vice versa).
+
+- Western Cape: ~4 Sesotho assessments
+- Free State: ~6 isiXhosa and Afrikaans assessments
+- Eastern Cape: 6 Afrikaans assessments dropped
+- KwaZulu-Natal: 4 Afrikaans and 4 Sesotho assessments dropped
+- Mpumalanga: 1 isiXhosa, 6 Sesotho
+- Limpopo: 15 Afrikaans and 4 Setswana
+- Gauteng: 6 isiNdebele
+
+In all `r 9910-9858` assessments dropped this way. **Note that Gauteng and Limpopo did not optimize** - optimization is possible but it would mean dropping a lot of data. For example, in the Eastern Cape the 2021 sample had 7 English assessments compared to 115 in 2024. Optimizing would require dropping all English assessments. 
+
+```{r}
+provs <- sort(unique(tb5$elom_prov))
+tb5_entropy <- tb5 %>% 
+  drop_na(year, elom_child_age, elom_child_sex, elom_language_assessment, n_pri_fee_group7, weight_child) %>% 
+    mutate(year = as.factor(year)) %>% 
+  mutate(elom_language_assessment = as.factor(elom_language_assessment)) %>% 
+  filter(elom_language_assessment!="Other") 
+
+
+# Drop observations that belong in categories that appear in one wave but not the other
+tb5_entropy <- tb5_entropy %>% 
+  filter(!(elom_prov=="Western Cape" & elom_language_assessment=="Sesotho")) %>% 
+  filter(!(elom_prov=="Free State"  & (elom_language_assessment=="isiXhosa" | elom_language_assessment=="Afrikaans"))) %>% 
+  filter(!(elom_prov=="Eastern Cape" & elom_language_assessment=="Afrikaans")) %>% 
+  filter(!(elom_prov=="KwaZulu-Natal"  & (elom_language_assessment=="Afrikaans" | elom_language_assessment=="Sesotho"))) %>% 
+  filter(!(elom_prov=="Mpumalanga"  & (elom_language_assessment=="isiXhosa" | elom_language_assessment=="Sesotho"))) %>% 
+    filter(!(elom_prov=="Limpopo"  & (elom_language_assessment=="Afrikaans" | elom_language_assessment=="Setswana"))) %>% 
+  filter(!(elom_prov=="Gauteng" & elom_language_assessment=="isiNdebele"))
+
+balance_within_prov <- function(prov) {
+  # print(prov)
+  dat <- tb5_entropy %>% filter(elom_prov == prov)
+  
+  if(length(unique(dat$year)) < 2) {
+    return(NULL) # skip if only one year present
+  }
+  
+  w.out <- weightit(
+    year ~ elom_child_age  + elom_child_sex + elom_language_assessment + n_pri_fee_group7,
+    data = dat,
+    method = "ebal",
+    estimand = "ATT",
+    focal = 2021,
+    s.weights = dat$weight_child
+  )
+  dat$weight_final <- w.out$weights
+  
+  dat <- dat %>% # Want to keep 2021 weights constant
+    mutate(weight_final = ifelse(year == 2024, w.out$weights, weight_child*1))
+  list(province = prov, data = dat, weights = w.out)
+}
+results_list <- map(provs, balance_within_prov) %>% compact()
+
+
+```
+
+::: {.panel-tabset}
+
+#### Eastern Cape
+```{r}
+love.plot(results_list[[1]][["weights"]]) 
+```
+
+#### Free State
+
+```{r}
+love.plot(results_list[[2]][["weights"]]) 
+```
+
+#### Gauteng
+
+```{r}
+# love.plot(results_list[[3]][["weights"]]) 
+cat("Did not converge")
+```
+
+#### KwaZulu-Natal
+
+```{r}
+love.plot(results_list[[4]][["weights"]]) 
+# cat("Did not converge")
+```
+
+#### Limpopo
+
+```{r}
+# love.plot(results_list[[5]][["weights"]]) 
+cat("Did not converge")
+```
+
+#### Mpumalanga
+
+```{r}
+love.plot(results_list[[6]][["weights"]]) 
+# cat("Did not converge")
+```
+
+#### North West
+
+```{r}
+love.plot(results_list[[7]][["weights"]]) 
+```
+
+#### Northern Cape
+
+```{r}
+love.plot(results_list[[8]][["weights"]]) 
+# cat("Did not converge")
+```
+
+#### Western Cape
+
+```{r}
+love.plot(results_list[[9]][["weights"]]) 
+```
+
+:::
+
+### Outcomes before and after entropy balancing
+
+```{r}
+library(srvyr)
+# helper to summarise one province's data
+
+results_list <- results_list %>%
+  keep(~ !(.x$province %in% c("Gauteng", "Limpopo")))
+
+
+summarise_prov <- function(res) {
+  
+  dat <- res$data %>%
+  mutate(
+    weight_child = as.numeric(weight_child),
+    weight_final = as.numeric(weight_final),
+    weight_child = ifelse(!is.finite(weight_child) | is.na(weight_child), 0, weight_child),
+    weight_final = ifelse(!is.finite(weight_final) | is.na(weight_final), 0, weight_final)
+  )
+  
+  des_orig <- as_survey_design(dat, ids = 1, weights = weight_child)
+  des_ebal <- as_survey_design(dat, ids = 1, weights = weight_final)
+
+  p_orig <- des_orig %>%
+    group_by(year) %>%
+    summarise(prop_orig = survey_mean(n_elom_total_cuts == "On Track",
+                                      vartype = c("se","ci"),
+                                      proportion = TRUE, na.rm = TRUE),
+              .groups = "drop") %>%
+    mutate(prop_orig_pct = 100 * prop_orig,
+           lcl_orig_pct  = 100 * prop_orig_low,
+           ucl_orig_pct  = 100 * prop_orig_upp)
+
+  p_ebal <- des_ebal %>%
+    group_by(year) %>%
+    summarise(prop_ebal = survey_mean(n_elom_total_cuts == "On Track",
+                                      vartype = c("se","ci"),
+                                      proportion = TRUE, na.rm = TRUE),
+              .groups = "drop") %>%
+    mutate(prop_ebal_pct = 100 * prop_ebal,
+           lcl_ebal_pct  = 100 * prop_ebal_low,
+           ucl_ebal_pct  = 100 * prop_ebal_upp)
+
+  Ns <- dat %>% count(year, name = "N_unw")
+
+  full_join(p_orig, p_ebal, by = "year") %>%
+    left_join(Ns, by = "year") %>%
+    mutate(elom_prov = res$province) %>%
+    relocate(elom_prov, year)
+}
+
+prov_props <- purrr::map_dfr(results_list, summarise_prov) %>%
+  arrange(elom_prov, year) %>% 
+  select(elom_prov, year, prop_orig_pct, prop_ebal_pct) %>% 
+  mutate(year=as.character(year),
+         `% On Track - original weight` = round(prop_orig_pct,1),
+         `% On Track - ebalance weight` = round(prop_ebal_pct,1),
+         `Perc. point diff` = `% On Track - ebalance weight` - `% On Track - original weight` ) %>% 
+  select(-c(prop_orig_pct, prop_ebal_pct))
+
+flextable(prov_props)
+
+
+
+```
+
+## Run entropy balancing on child age and child sex only
+
+Here we replicate the above but balance on only child age and sex. 
+
+### Balance on selected variables
+
+The sample is now bigger because we're using fewer variables, meaning fewer assessments need to be dropped due to missing data. 
+
+No need to replicate earlier graphs.
+
+
+```{r}
+provs <- sort(unique(tb5$elom_prov))
+tb5_entropy <- tb5 %>% 
+  drop_na(year, elom_child_age, elom_child_sex, elom_language_assessment, n_pri_fee_group7, weight_child) %>% 
+  mutate(year = as.factor(year)) %>% 
+  mutate(elom_language_assessment = as.factor(elom_language_assessment))
+
+balance_within_prov <- function(prov) {
+  # print(prov)
+  dat <- tb5_entropy %>% filter(elom_prov == prov)
+  
+  if(length(unique(dat$year)) < 2) {
+    return(NULL) # skip if only one year present
+  }
+  
+  w.out <- weightit(
+    year ~ elom_child_age  + elom_child_sex,
+    data = dat,
+    method = "ebal",
+    estimand = "ATT",
+    focal = 2021,
+    s.weights = dat$weight_child
+  )
+  
+  dat <- dat %>% # Want to keep 2021 weights constant
+    mutate(weight_final = ifelse(year == 2024, w.out$weights, weight_child*1))
+  list(province = prov, data = dat, weights = w.out)
+}
+results_list <- map(provs, balance_within_prov) %>% compact()
+
+```
+
+
+### Outcomes before and after entropy balancing
+
+Note that Mpumalanga and Gauteng don't need to be dropped due to optimisation issues. The change in scores after entropy balancing are now less substantial than before. 
+
+```{r}
+library(srvyr)
+# helper to summarise one province's data
+
+
+summarise_prov <- function(res) {
+  
+  dat <- res$data %>%
+  mutate(
+    weight_child = as.numeric(weight_child),
+    weight_final = as.numeric(weight_final),
+    weight_child = ifelse(!is.finite(weight_child) | is.na(weight_child), 0, weight_child),
+    weight_final = ifelse(!is.finite(weight_final) | is.na(weight_final), 0, weight_final)
+  )
+  
+  des_orig <- as_survey_design(dat, ids = 1, weights = weight_child)
+  des_ebal <- as_survey_design(dat, ids = 1, weights = weight_final)
+
+  p_orig <- des_orig %>%
+    group_by(year) %>%
+    summarise(prop_orig = survey_mean(n_elom_total_cuts == "On Track",
+                                      vartype = c("se","ci"),
+                                      proportion = TRUE, na.rm = TRUE),
+              .groups = "drop") %>%
+    mutate(prop_orig_pct = 100 * prop_orig,
+           lcl_orig_pct  = 100 * prop_orig_low,
+           ucl_orig_pct  = 100 * prop_orig_upp)
+
+  p_ebal <- des_ebal %>%
+    group_by(year) %>%
+    summarise(prop_ebal = survey_mean(n_elom_total_cuts == "On Track",
+                                      vartype = c("se","ci"),
+                                      proportion = TRUE, na.rm = TRUE),
+              .groups = "drop") %>%
+    mutate(prop_ebal_pct = 100 * prop_ebal,
+           lcl_ebal_pct  = 100 * prop_ebal_low,
+           ucl_ebal_pct  = 100 * prop_ebal_upp)
+
+  Ns <- dat %>% count(year, name = "N_unw")
+
+  full_join(p_orig, p_ebal, by = "year") %>%
+    left_join(Ns, by = "year") %>%
+    mutate(elom_prov = res$province) %>%
+    relocate(elom_prov, year)
+}
+
+prov_props <- purrr::map_dfr(results_list, summarise_prov) %>%
+  arrange(elom_prov, year) %>% 
+  select(elom_prov, year, prop_orig_pct, prop_ebal_pct) %>% 
+  mutate(year=as.character(year),
+         `% On Track - original weight` = round(prop_orig_pct,1),
+         `% On Track - ebalance weight` = round(prop_ebal_pct,1),
+         `Perc. point diff` = `% On Track - ebalance weight` - `% On Track - original weight` ) %>% 
+  select(-c(prop_orig_pct, prop_ebal_pct))
+
+flextable(prov_props)
+
+
+
+```
+
+
+# CEM 
+
+Translated much of the same logic from Jesal's Stata do file. I didn't match on asset list and caregiver education due to those being completely/largely missing in the 2021 data. 
+
+## Match on age and gender
+Include province as matching variable. 
+
+Use 2021 as the base group.
+
+```{r}
+df <- tb5 %>%
+  filter(!is.na(weight_child),
+          !is.na(year),
+         !is.na(elom_child_sex),
+         !is.na(elom_child_age)) %>% 
+  select(-ends_with("score")) %>% 
+  mutate(
+    year = factor(year, levels = c(2021, 2024)),
+    treat_2024 = as.integer(year == 2024),
+    ontrack = as.integer(n_elom_total_cuts == "On Track")
+  ) 
+  
+
+age_cuts = c(49, 52, 54, 56, 58, 60)
+
+set.seed(123)
+C <- cem(
+  treatment = "treat_2024",
+  baseline.group = '0',
+  data = df,
+  cutpoints = list(elom_child_age = age_cuts),
+  grouping = list(
+    elom_child_sex = levels(df$elom_child_sex),
+    elom_language_assessment = levels(df$elom_language_assessment),
+    n_pri_fee_group7 = levels(df$n_pri_fee_group7),
+    elom_prov = levels(df$elom_prov)
+  ),
+  drop = c("year", "n_pri_fee_group7", "n_pri_fee_group7", "n_elom_total_cuts","ontrack","weight_child","id_child","id_enumerator","cg_education" ),
+  keep.all = TRUE
+)
+
+# Extract weights 
+df$cem_w <- C$w
+df$final_w <- df$cem_w * df$weight_child
+
+```
+### Estimate % On Track
+
+```{r}
+# make sure ontrack is 0/1
+df <- df %>% mutate(ontrack = as.integer(n_elom_total_cuts == "On Track"))
+
+# designs
+design_orig <- svydesign(ids = ~1, weights = ~weight_child, data = df)
+design_cem  <- svydesign(ids = ~1, weights = ~final_w,     data = df)
+
+# % On Track by year × province — ORIGINAL weights
+prop_orig <- svyby(
+  ~ontrack, ~year + elom_prov, design_orig,
+  FUN = svymean, vartype = "ci", na.rm = TRUE, keep.names = FALSE
+) %>%
+  mutate(
+    prop_orig_pct = 100 * ontrack,
+    lcl_orig_pct  = 100 * ci_l,
+    ucl_orig_pct  = 100 * ci_u
+  ) %>%
+  select(elom_prov, year, prop_orig_pct, lcl_orig_pct, ucl_orig_pct)
+
+# % On Track by year × province — CEM weights
+prop_cem <- svyby(
+  ~ontrack, ~year + elom_prov, design_cem,
+  FUN = svymean, vartype = "ci", na.rm = TRUE, keep.names = FALSE
+) %>%
+  mutate(
+    prop_cem_pct = 100 * ontrack,
+    lcl_cem_pct  = 100 * ci_l,
+    ucl_cem_pct  = 100 * ci_u
+  ) %>%
+  select(elom_prov, year, prop_cem_pct, lcl_cem_pct, ucl_cem_pct)
+
+# optional: add unweighted Ns for context
+Ns <- df %>% count(elom_prov, year, name = "N_unw")
+
+# combine
+out <- prop_orig %>%
+  inner_join(prop_cem, by = c("elom_prov","year")) %>%
+  left_join(Ns, by = c("elom_prov","year")) %>%
+  mutate(
+    across(ends_with("_pct"), ~round(.x, 1)),
+    across(starts_with("lcl_") | starts_with("ucl_"), ~round(.x, 1))
+  ) %>%
+  arrange(elom_prov, year) %>% 
+  mutate(`Perc. point diff` = ifelse(year==2024, prop_cem_pct-prop_orig_pct, NA)) %>%
+  select(elom_prov, year, `% On Track - original weights`=prop_orig_pct, `% On Track - CEM-adjusted weights`=prop_cem_pct, `Perc. point diff`, N_unw) %>% 
+  flextable()
+
+out
+
+
+```
+
+
+## Match on age, gender, and assessment language
+
+Unlike with the entropy balancing approach, and against expectations, we now see the proportion On Track in the Western Cape decline after matching while in the Free State the proportion On Track increases. This is likely due to CEM balancing the joint distribution and dropping 'cells' (i.e., combinations that appear in 2021(2024) but not in 2024(2021)) while entropy balances means and keeps cells.
+
+Note that the % On Track in the baseline group, 2021, also changes due to assessments dropped during the matching procedure. 
+
+```{r}
+df <- tb5 %>%
+  filter(!is.na(year),
+         !is.na(elom_child_sex),
+         !is.na(elom_child_age),
+         !is.na(elom_language_assessment),
+         # !is.na(n_pri_fee_group7),
+         !is.na(weight_child)) %>%
+  select(-ends_with("score")) %>% 
+  mutate(
+    year = factor(year, levels = c(2021, 2024)),
+    treat_2024 = as.integer(year == 2024),
+    ontrack = as.integer(n_elom_total_cuts == "On Track"),
+    elom_child_sex = as.factor(elom_child_sex),
+    elom_language_assessment = as.factor(elom_language_assessment),
+    n_pri_fee_group7 = as.factor(n_pri_fee_group7)
+  )
+
+age_cuts <- c(49, 52, 54, 56, 58, 60)
+
+set.seed(123)
+C <- cem(
+  treatment = "treat_2024",
+  baseline.group = '0',
+  data = df,
+  cutpoints = list(elom_child_age = age_cuts),
+  grouping = list(
+    elom_child_sex = levels(df$elom_child_sex),
+    elom_language_assessment = levels(df$elom_language_assessment),
+    # n_pri_fee_group7 = levels(df$n_pri_fee_group7),
+    elom_prov = levels(df$elom_prov)
+  ),
+  drop = c("year","n_elom_total_cuts","ontrack","weight_child","id_child","id_enumerator","cg_education" , "n_pri_fee_group7"),
+  keep.all = TRUE
+)
+
+# Extract weights 
+df$cem_w <- C$w
+df$final_w <- df$cem_w * df$weight_child
+
+```
+
+### Estimate % On Track
+
+```{r}
+# make sure ontrack is 0/1
+df <- df %>% mutate(ontrack = as.integer(n_elom_total_cuts == "On Track"))
+
+# designs
+design_orig <- svydesign(ids = ~1, weights = ~weight_child, data = df)
+design_cem  <- svydesign(ids = ~1, weights = ~final_w,     data = df)
+
+# % On Track by year × province — ORIGINAL weights
+prop_orig <- svyby(
+  ~ontrack, ~year + elom_prov, design_orig,
+  FUN = svymean, vartype = "ci", na.rm = TRUE, keep.names = FALSE
+) %>%
+  mutate(
+    prop_orig_pct = 100 * ontrack,
+    lcl_orig_pct  = 100 * ci_l,
+    ucl_orig_pct  = 100 * ci_u
+  ) %>%
+  select(elom_prov, year, prop_orig_pct, lcl_orig_pct, ucl_orig_pct)
+
+# % On Track by year × province — CEM weights
+prop_cem <- svyby(
+  ~ontrack, ~year + elom_prov, design_cem,
+  FUN = svymean, vartype = "ci", na.rm = TRUE, keep.names = FALSE
+) %>%
+  mutate(
+    prop_cem_pct = 100 * ontrack,
+    lcl_cem_pct  = 100 * ci_l,
+    ucl_cem_pct  = 100 * ci_u
+  ) %>%
+  select(elom_prov, year, prop_cem_pct, lcl_cem_pct, ucl_cem_pct)
+
+# optional: add unweighted Ns for context
+Ns <- df %>% count(elom_prov, year, name = "N_unw")
+
+# combine
+out <- prop_orig %>%
+  inner_join(prop_cem, by = c("elom_prov","year")) %>%
+  left_join(Ns, by = c("elom_prov","year")) %>%
+  mutate(
+    across(ends_with("_pct"), ~round(.x, 1)),
+    across(starts_with("lcl_") | starts_with("ucl_"), ~round(.x, 1))
+  ) %>%
+  arrange(elom_prov, year) %>% 
+  mutate(`Perc. point diff` = ifelse(year==2024, prop_cem_pct-prop_orig_pct, NA)) %>%
+  select(elom_prov, year, `% On Track - original weights`=prop_orig_pct, `% On Track - CEM-adjusted weights`=prop_cem_pct, `Perc. point diff`, N_unw) %>% 
+  flextable()
+
+out
+
+
+```
+
+
+## Match on age, gender, assessment language, and fee group
+
+
+```{r}
+df <- tb5 %>%
+  filter(!is.na(year),
+         !is.na(elom_child_sex),
+         !is.na(elom_child_age),
+         !is.na(elom_language_assessment),
+         !is.na(n_pri_fee_group7),
+         !is.na(weight_child)) %>%
+  select(-ends_with("score")) %>% 
+  mutate(
+    year = factor(year, levels = c(2021, 2024)),
+    treat_2024 = as.integer(year == 2024),
+    ontrack = as.integer(n_elom_total_cuts == "On Track"),
+    elom_child_sex = as.factor(elom_child_sex),
+    elom_language_assessment = as.factor(elom_language_assessment),
+    n_pri_fee_group7 = as.factor(n_pri_fee_group7)
+  )
+
+age_cuts <- c(49, 52, 54, 56, 58, 60)
+
+set.seed(123)
+C <- cem(
+  treatment = "treat_2024",
+  baseline.group = '0',
+  data = df,
+  cutpoints = list(elom_child_age = age_cuts),
+  grouping = list(
+    elom_child_sex = levels(df$elom_child_sex),
+    elom_language_assessment = levels(df$elom_language_assessment),
+    n_pri_fee_group7 = levels(df$n_pri_fee_group7),
+    elom_prov = levels(df$elom_prov)
+  ),
+  drop = c("year","n_elom_total_cuts","ontrack","weight_child","id_child","id_enumerator","cg_education" ),
+  keep.all = TRUE
+)
+
+# Extract weights 
+df$cem_w <- C$w
+df$final_w <- df$cem_w * df$weight_child
+
+```
+
+
+
+
+
+
+### Estimate % On Track
+
+```{r}
+# make sure ontrack is 0/1
+df <- df %>% mutate(ontrack = as.integer(n_elom_total_cuts == "On Track"))
+
+# designs
+design_orig <- svydesign(ids = ~1, weights = ~weight_child, data = df)
+design_cem  <- svydesign(ids = ~1, weights = ~final_w,     data = df)
+
+# % On Track by year × province — ORIGINAL weights
+prop_orig <- svyby(
+  ~ontrack, ~year + elom_prov, design_orig,
+  FUN = svymean, vartype = "ci", na.rm = TRUE, keep.names = FALSE
+) %>%
+  mutate(
+    prop_orig_pct = 100 * ontrack,
+    lcl_orig_pct  = 100 * ci_l,
+    ucl_orig_pct  = 100 * ci_u
+  ) %>%
+  select(elom_prov, year, prop_orig_pct, lcl_orig_pct, ucl_orig_pct)
+
+# % On Track by year × province — CEM weights
+prop_cem <- svyby(
+  ~ontrack, ~year + elom_prov, design_cem,
+  FUN = svymean, vartype = "ci", na.rm = TRUE, keep.names = FALSE
+) %>%
+  mutate(
+    prop_cem_pct = 100 * ontrack,
+    lcl_cem_pct  = 100 * ci_l,
+    ucl_cem_pct  = 100 * ci_u
+  ) %>%
+  select(elom_prov, year, prop_cem_pct, lcl_cem_pct, ucl_cem_pct)
+
+# optional: add unweighted Ns for context
+Ns <- df %>% count(elom_prov, year, name = "N_unw")
+
+# combine
+out <- prop_orig %>%
+  inner_join(prop_cem, by = c("elom_prov","year")) %>%
+  left_join(Ns, by = c("elom_prov","year")) %>%
+  mutate(
+    across(ends_with("_pct"), ~round(.x, 1)),
+    across(starts_with("lcl_") | starts_with("ucl_"), ~round(.x, 1))
+  ) %>%
+  arrange(elom_prov, year) %>% 
+  mutate(`Perc. point diff` = ifelse(year==2024, prop_cem_pct-prop_orig_pct, NA)) %>%
+  select(elom_prov, year, `% On Track - original weights`=prop_orig_pct, `% On Track - CEM-adjusted weights`=prop_cem_pct, `Perc. point diff`, N_unw) %>% 
+  flextable()
+
+out
+
+
+```
+
+
+# The proportion assessed where the assessment language matches main home language
+
+Gunilla is concerned about the earlier finding that the % speaking English vs Sesotho in 2021 vs 2024 to be very different. The table below shows the % of assessed children for whom the assessment language matches the language the child mostly speaks at home (from PCG form, cg_language_home). 
+
+The table shows the language outcomes for the 2024 sample only. The table's results are notable for:
+
+- 25% of Eastern Cape assessments were conducted in English when the child mostly spoke another language at home
+- Gauteng's result were striking. 39% of Gauteng assessments were conducted in English when the child mostly spoke another language at home. Similarly for Sesotho for assessments (24%), Setswana (29%), Sepedi (37%).
+- 54% of Northern Cape assessments were conducted in English when the child mostly spoke another language at home. 
+- 41% of North West assessments were conducted in English when the child mostly spoke another language at home. 
+- 22% of Western Cape assessments were conducted in English when the child mostly spoke another language at home. 
+
+```{r}
+lang_cols <- paste0("cg_languages_", 1:11)
+
+tb5_2024_lang <- tb5_2024 %>% 
+  select(id_child, elom_prov, cg_language_home, elom_language_assessment) %>% 
+  as_factor() 
+
+tb5_2024_home_langs <- tb5_2024 %>% 
+  select(id_child, all_of(lang_cols)) %>% 
+  pivot_longer(
+    cols = starts_with("cg_languages_"),
+    names_to = "name",
+    values_to = "value"
+  ) %>% 
+  filter(as.integer(value) == 1) %>% 
+  group_by(id_child) %>% 
+  filter(n() == 1) %>% 
+  ungroup() %>% 
+  mutate(cg_language_coerce = as.integer(str_remove(name, "^cg_languages_")),
+         cg_language_coerce = factor(cg_language_coerce, levels=c(1:11),
+                                     labels = c("Afrikaans", 
+                                                "English",
+                                                "isiNdebele",
+                                                "isiXhosa",
+                                                "isiZulu",
+                                                "Sesotho",
+                                                "Sepedi",
+                                                "Setswana",
+                                                "siSwati", 
+                                                "Tshivenda",
+                                                "Xitsonga"))) %>% 
+  select(id_child, cg_language_coerce)
+
+tb5_2024_lang <- tb5_2024_lang %>%
+  left_join(tb5_2024_home_langs, by = "id_child") %>%
+  mutate(cg_language_coerce = factor(cg_language_coerce,
+                                     levels = levels(cg_language_home)),
+         cg_language_home = if_else(is.na(cg_language_home),
+                                    cg_language_coerce, cg_language_home)) %>%
+  select(-cg_language_coerce) %>% 
+  mutate(elom_language_assessment =
+           forcats::fct_recode(elom_language_assessment,
+                      "Sepedi" = "Sesotho se Leboa (Sepedi)"))
+
+
+# build the summary table
+tbl <- tb5_2024_lang %>% 
+  mutate(language_match = as.integer(as.character(elom_language_assessment) ==
+                                     as.character(cg_language_home))) %>% 
+  filter(!is.na(cg_language_home), cg_language_home != "", cg_language_home != "None") %>% 
+  group_by(elom_prov, elom_language_assessment) %>% 
+  summarise(prop_language_match = round(100 * mean(language_match), 1),
+            n_language = n(), .groups = "drop") %>% 
+  rename(
+    Province = elom_prov,
+    `Assessment language` = elom_language_assessment,
+    `% most used home language matches assessment language` = prop_language_match,
+    N = n_language
+  )
+
+# color palette: low values = red, high = white 
+pal <- col_numeric(
+  palette = c("#b2182b", "#fddbc7", "#ffffff"), # deep red → light red → white
+  domain  = c(0, 100)
+)
+
+# build flextable
+ft <- flextable(tbl) %>%
+  colformat_num(j = "% most used home language matches assessment language",
+                digits = 1, suffix = "%")
+
+# apply background gradient to that column
+col_vals <- tbl$`% most used home language matches assessment language`
+ft <- bg(
+  ft,
+  j = "% most used home language matches assessment language",
+  i = seq_len(nrow(tbl)),
+  bg = pal(col_vals)
+)
+
+# optional: improve contrast for very low values (white text on dark red)
+ft <- color(
+  ft,
+  j = "% most used home language matches assessment language",
+  i = which(col_vals <= 25),  # threshold is your call
+  color = "white"
+) %>%
+  autofit()
+
+ft
+
+```
+
+To explore this finding more, here we compare the relationship between Total ELOM scores and not having the assessment conducted in the child's home language. Below we use a simple mixed effects model where ECD centre, enumeration area and stratum are used as random effects. Fixed effects include child age, child sex, height-for-age, ELP fee level, and lastly an indicator saying whether the assessment was conducted in the most spoken language at the child's home. 
+
+**The table below shows that when the language of assessment matches the language most spoken at home, the child on average 1.12 points more on average.** Therefore
+
+```{r}
+library(lme4)
+library(sjPlot)
+
+tb5x <- tb5_2024 %>%
+  left_join(tb5_2024_lang , by = "id_child") %>%
+  as_factor() %>% 
+  mutate(
+    # language_match
+   language_match = as.integer(as.character(elom_language_assessment.y) ==
+                                     as.character(cg_language_home.y)),
+    # outcome: 1 = On Track
+    ontrack = as.integer(n_elom_total_cuts == "On Track"),
+    # tidy covariates
+    elom_child_sex = as.factor(elom_child_sex),
+    n_pri_fee_group7 = as.factor(n_pri_fee_group7)
+  )
+
+mod <- lmer(
+  n_elom_total_score ~ elom_child_age + elom_child_sex + n_elom_zhfa + n_pri_fee_group7 +
+    language_match +
+    (1 | id_ecd) + (1 | id_ea) + (1 | stratum),
+  data = tb5x,
+  # family = binomial(link = "logit") #,
+  # control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 1e5))
+)
+
+
+tab_model(
+  mod,
+  dv.labels  = "ELOM total score",
+  pred.labels = c(
+    "(Intercept)",
+    "Child age (months)"        = "elom_child_age",
+    "Girl (ref: Boy)"           = "elom_child_sexGirls",
+    "Height-for-age (z)"        = "n_elom_zhfa",
+    "Fee group (factor)"        = "n_pri_fee_group7",
+    "Assessment language = home language" = "language_match"
+  ),
+  # show.ci   = TRUE,
+  show.icc  = TRUE,             # intraclass correlation
+  show.r2   = TRUE,             
+  show.se   = TRUE,
+  show.re.var = TRUE            # random effect variances
+)
+```
+
+
+### Using the ELOM form home language instead of the PCG form's stated home language
+As per GP's email, provide the percentage of assessments per province where the ELOM assessment language match the child's home language as per the ELOM form (instead of the PCG form).
+
+```{r}
+
+
+tb5_2024_lang_elom <- tb5_2024 %>%
+  transmute(
+    elom_prov,
+    assess = as.integer(zap_labels(elom_language_assessment)),
+    child  = as.character(zap_labels(elom_language_child))
+  ) %>%
+  mutate(
+    # normalize spacing and pad with spaces to make whole-number word-boundary matches easy
+    child_norm = paste0(" ", str_squish(child), " "),
+    language_match = if_else(
+      !is.na(assess) & !is.na(child_norm) &
+        str_detect(child_norm, paste0("\\b", assess, "\\b")),
+      1L, 0L, missing = 0L
+    )
+  ) %>%
+  select(elom_prov, elom_language_assessment = assess,
+         elom_language_child = child, language_match)
+
+tbl <- tb5_2024_lang_elom %>% 
+  # mutate(language_match = as.integer(as.character(elom_language_assessment) ==
+  #                                    as.character(cg_language_home))) %>% 
+  # filter(!is.na(cg_language_home), cg_language_home != "", cg_language_home != "None") %>% 
+  group_by(elom_prov) %>%
+  summarise(prop_language_match = round(100 * mean(language_match), 1),
+            n_language = n(), .groups = "drop") %>% 
+  rename(
+    Province = elom_prov,
+    # `Assessment language` = elom_language_assessment,
+    `% ELOM home languages matches assessment language` = prop_language_match,
+    N = n_language
+  ) 
+
+tbl %>% 
+  flextable()
+
+```

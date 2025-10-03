@@ -1,0 +1,542 @@
+---
+title: "Western Cape & Gauteng ELP characteristics"
+author: "Tyryn"
+format:
+  html:
+    theme: lumen
+    code-fold: true
+    embed-resources: true    
+    highlight-style: tango
+    toc: true
+    toc-depth: 5
+    number-sections: false
+    anchor-sections: false
+execute:
+  warning: false
+---
+
+
+
+```{r}
+pacman::p_load(
+ leaflet,
+ sf, 
+ dplyr,
+ RColorBrewer,
+ htmltools,
+ forcats,
+ haven,
+ tidyr,
+ flextable
+)
+
+
+# Load data
+tb5_2024 <- read_dta("data/2024tb5_all_forms_inter_data.dta") 
+#   select(id_ecd, longitude, latitude, n_pri_fee_group7)
+# 
+# Merge in assessor data
+# Get the id_enumerator variable from an earlier dataset
+tb5_2024_id_enumerator  <- read_dta("data/tb5_2024_elom_elp_client.dta") %>% 
+  select(id_child, date, id_enumerator)
+tb5_2024 <- tb5_2024 %>% 
+  left_join(tb5_2024_id_enumerator, by = join_by(id_child))
+
+
+
+```
+
+The aim of this document is to help explain why fee group Q3 and Q4 ELPs in the Western Cape and Gauteng do particularly poorly. The table below shows the proportion On Track within Q3 and Q4 for each province. 
+
+```{r}
+tb_summary_wide <- tb5_2024 %>% 
+  filter(n_pri_fee_group7 %in% c(4, 5)) %>% 
+  group_by(elom_prov, n_pri_fee_group7) %>% 
+  summarise(
+    pc_on_track = round(100 * mean(n_elom_total_cuts_3, na.rm = TRUE)),
+    .groups = "drop"
+  ) %>% 
+  pivot_wider(
+    names_from = n_pri_fee_group7,
+    values_from = pc_on_track,
+    names_glue = "pc_on_track (Fee group Q{n_pri_fee_group7 - 1})"
+  )
+
+flextable(tb_summary_wide) %>% 
+  colformat_num(
+    j = grep("^pc_on_track \\(Fee group Q", names(tb_summary_wide), value = TRUE),
+    digits = 0,
+    suffix = "%"
+  ) %>% 
+  autofit()
+
+
+
+```
+
+
+# Characteristics of Q3 and Q4 ELPs in the Western Cape & Gauteng vs rest of country
+As a first step, lets take a brief look at how the Western Cape & Gauteng Q3 and Q4 ELPs differ from Q3 and Q4 children in the rest of the country. Here we are testing the idea that higher costs of living in the Western Cape and Gauteng mean that their Q3 and Q4 ELPs are worse in quality than Q3 and Q4 ELPs in the other provinces. 
+
+### ELP characteristics
+Of the tables below, the only variable where the Western Cape and Gauteng Q3 and Q4 ELPs did relatively poorly is their rate of partial registration. Otherwise, there isn't clear evidence that those Q3 and Q4 ELPs are relatively worse in quality than ELPs in other provinces. 
+
+```{r}
+tb5_2024_elp <- tb5_2024 %>% 
+  distinct(id_ecd, .keep_all=TRUE)
+
+# Building type
+building_type_df <- tb5_2024 %>% 
+  # select(elom_prov, n_fa_building_2) %>% 
+  group_by(elom_prov, n_pri_fee_group7) %>% 
+  summarise(value = round(100*mean(n_fa_building_1))) %>% 
+  distinct(elom_prov, n_pri_fee_group7, value) %>% 
+  filter(n_pri_fee_group7==3 | n_pri_fee_group7==4) %>% 
+  as_factor() %>% 
+  pivot_wider(names_from = n_pri_fee_group7)
+
+# Sanitation - tap for handwashing
+handwashing_type_df <- tb5_2024 %>% 
+    group_by(elom_prov, n_pri_fee_group7) %>% 
+  summarise(value = round(100*mean(n_fa_handwashing_1, na.rm=TRUE))) %>% 
+  distinct(elom_prov, n_pri_fee_group7, value) %>% 
+  filter(n_pri_fee_group7==3 | n_pri_fee_group7==4) %>% 
+    as_factor() %>% 
+  pivot_wider(names_from = n_pri_fee_group7)
+
+# Child practitioner ratio
+ratio_df <- tb5_2024 %>% 
+  group_by(elom_prov, n_pri_fee_group7) %>% 
+  summarise(value = round(mean(n_pri_child_teacher_ratio, na.rm=TRUE))) %>% 
+  distinct(elom_prov, n_pri_fee_group7, value) %>% 
+  filter(n_pri_fee_group7==3 | n_pri_fee_group7==4)  %>% 
+  as_factor() %>% 
+  pivot_wider(names_from = n_pri_fee_group7)
+
+# Partial registered
+registered_df <- tb5_2024 %>% 
+  group_by(elom_prov, n_pri_fee_group7) %>% 
+  summarise(value = round(100*mean(pri_registered_partial==1, na.rm=TRUE))) %>% 
+  distinct(elom_prov, n_pri_fee_group7, value) %>% 
+  filter(n_pri_fee_group7==3 | n_pri_fee_group7==4)  %>% 
+  as_factor() %>% 
+  pivot_wider(names_from = n_pri_fee_group7)  
+
+```
+
+::: {.panel-tabset}
+
+#### Partial registration
+
+```{r}
+registered_df %>% 
+  flextable()  %>% 
+    colformat_num(
+    j = c(2,3), 
+    suffix = "%"
+  )
+
+```
+
+#### Conventional building (brick & mortar)
+
+```{r}
+building_type_df %>% 
+  flextable() %>% 
+    colformat_num(
+    j = c(2,3), 
+    suffix = "%"
+  )
+
+```
+
+#### Taps for handwashing
+
+```{r}
+handwashing_type_df  %>% 
+  flextable() %>% 
+    colformat_num(
+    j = c(2,3), 
+    suffix = "%"
+  )
+
+
+```
+
+#### Child-practitioner ratio
+
+```{r}
+ratio_df %>% 
+  flextable() 
+
+```
+
+:::
+
+### LPQA - % ELPs with a "Good" rating
+The table below shows the proportion of Q3 and Q4 ELPs in each province with a "Good" LPQA rating. Again we don't get an explanation for the relatively low proportion of Western Cape and Gauteng On Track assessments - in fact, these two provinces did substantially better than other provinces in the LPQA. 
+
+```{r}
+tb5_2024_elp %>% 
+  # select(elom_prov, n_lp_total_lpqa_rating) %>% 
+  group_by(elom_prov, n_pri_fee_group7) %>% 
+  summarise(value = round(100*mean(n_lp_total_lpqa_rating==3))) %>% 
+  filter(n_pri_fee_group7==3 | n_pri_fee_group7==4) %>% 
+  as_factor() %>% 
+    pivot_wider(names_from = n_pri_fee_group7)  %>% 
+  flextable() %>% 
+    colformat_num(
+    j = c(2,3), 
+    suffix = "%"
+  )
+
+
+```
+
+
+# Investigate assessors
+Given the fruitlessness of the above investigation, its probably worthwhile exploring whether assessor bias could be to blame. If the majority of Q3 and Q4 assessments are done by a problematic assessor it would have a significant impact on outcomes for those fee groups. 
+
+- Get the IDs of the assessors in Q3 and Q4, check if high concentration
+- Check what their scoring looks like - are their items that they score particularly low in?
+
+```{r}
+tb5_assessors <- tb5_2024 %>% 
+  filter((elom_prov=="Gauteng" | elom_prov=="Western Cape") & (n_pri_fee_group7==4 | n_pri_fee_group7==5)) %>% 
+  mutate(id_enumerator = as.character(id_enumerator))
+
+tb5_assessors_count <- tb5_assessors %>% 
+  group_by(elom_prov, n_pri_fee_group7, id_enumerator) %>% 
+  summarise(n=n(), .groups="drop") %>% 
+  drop_na() %>% 
+  group_by(elom_prov, n_pri_fee_group7) %>% 
+  mutate(`% assessments` = round(100*n/sum(n))) %>% 
+  ungroup()
+
+
+```
+
+The tables below show the proportion of Q3 and Q5 assessments done by each assessor. In the Western Cape we see a bit of concentration with the majority of assessments done by assessors 2964, 3862, 8803. In Gauteng assessments are fairly equally dispersed between assessors. 
+
+::: {.panel-tabset}
+
+### Western Cape
+```{r}
+tb5_assessors_count %>% 
+  filter(elom_prov=="Western Cape") %>% 
+  as_factor() %>% 
+  select(-n, -elom_prov) %>% 
+  pivot_wider(names_from = n_pri_fee_group7, values_from = `% assessments`) %>% 
+  flextable()
+
+```
+
+### Gauteng
+
+```{r}
+tb5_assessors_count %>% 
+  filter(elom_prov=="Gauteng") %>% 
+  as_factor() %>% 
+  select(-n, -elom_prov) %>% 
+  pivot_wider(names_from = n_pri_fee_group7, values_from = `% assessments`) %>% 
+  flextable()
+
+```
+:::
+
+## Assessor scores
+Here we look at the average score each assessor assigned to each item. We assign each score a percentage. We're looking to see if there are assessors that consistently scored unusually low for particular items.
+
+*Note that we adjusted the scores for assessors 563, 944 and 8788. These assessors do not appear in the following tables. *
+
+```{r}
+library(scales)
+# Possible scores
+item_1 <- 2.91
+item_2 <- 3.59
+item_3 <- 6.3
+item_4 <- 7.2
+item_5 <- 4.2
+item_6 <- 4.58
+item_7 <- 4.74
+item_8 <- 6.48
+item_9 <- 6.03
+item_10 <- 4.51
+item_11 <- 4.01
+item_12 <- 2.8
+item_13 <- 2.65
+item_14 <- 3.11
+item_15 <- 6.72
+item_16 <- 4.03
+item_17 <- 6.14
+item_18 <- 3.21
+item_19 <- 3.42
+item_20 <- 3.41
+item_21 <- 3.17
+item_22 <- 3.09
+item_23 <- 3.70
+
+# Get the data from Genesis with item values
+tb5_item <- read_dta("data/tb5_2024_elom_elp_client.dta")
+tb5_item_percent <- tb5_item %>% 
+  select(id_child, starts_with("score")) %>% 
+  left_join(tb5_2024, by = "id_child") %>% 
+  select(elom_prov, starts_with("score"), id_enumerator, n_pri_fee_group7) %>% 
+  filter(
+    elom_prov %in% c("Western Cape", "Gauteng") &
+      n_pri_fee_group7 %in% c(4, 5)
+  ) %>% 
+  # scale each score by its corresponding item_x
+  mutate(across(
+    score_1:score_23,
+    ~ .x / get(sub("score_", "item_", cur_column())),
+    .names = "{.col}_prop"
+  )) %>% 
+  group_by(elom_prov, id_enumerator, n_pri_fee_group7) %>% 
+  summarise(
+    across(
+      ends_with("_prop"),
+      ~ round(100 * mean(.x, na.rm = TRUE)),
+      .names = "{sub('_prop','',.col)}"
+    ),
+    .groups = "drop"
+  ) %>% 
+  as_factor()
+
+tb5_item_percent_wc <- tb5_item_percent %>% 
+  filter(elom_prov=="Western Cape") %>% 
+  mutate(id_enumerator=as.character(id_enumerator)) %>% 
+  # Merge in assessment count
+  left_join((tb5_assessors_count %>%  as_factor())) %>% 
+  relocate(n, .after = n_pri_fee_group7)
+
+tb5_item_percent_gp <- tb5_item_percent %>% 
+  filter(elom_prov=="Gauteng") %>% 
+  mutate(id_enumerator=as.character(id_enumerator)) %>% 
+  # Merge in assessment count
+  left_join((tb5_assessors_count %>%  as_factor())) %>% 
+  relocate(n, .after = n_pri_fee_group7)
+
+make_score_flextable <- function(df) {
+  # Identify score columns
+  score_cols <- grep("^score_", names(df), value = TRUE)
+  
+  if (length(score_cols) == 0) {
+    stop("No columns starting with 'score_' were found in the dataframe.")
+  }
+  
+  # Color scale: darker near 0, lighter near 100
+  pal <- colorRampPalette(c("#08306b", "#0d4ea6", "#1873cc", "#4a9dff", "#8ec2ff", "#cfe8ff"))
+  col_fun <- scales::col_numeric(palette = pal(100), domain = c(0, 100), na.color = NA)
+  
+  # Create flextable
+  ft <- regulartable(df)
+  
+  # Format score columns as 0–100 integers + add %
+  ft <- colformat_num(ft, j = score_cols, digits = 0, suffix = "%")
+  
+  # Apply conditional background and text color
+  for (col in score_cols) {
+    vals <- df[[col]]
+    bg_cols <- col_fun(vals)
+    ft <- bg(ft, j = col, i = seq_len(nrow(df)), bg = bg_cols)
+    # Improve contrast: white text for low values (dark background)
+    ft <- color(ft, j = col, i = which(!is.na(vals) & vals <= 30), color = "white")
+  }
+  
+  # Final polish
+  ft <- align(ft, align = "center", j = score_cols)
+  ft <- autofit(ft)
+  
+  return(ft)
+}
+
+```
+
+#### Western Cape
+
+While there doesn't appear to be anything particularly striking the following items are noteworthy. 
+
+**Fee group 3:** Items 9, 10, 17 and 18
+
+**Fee group 4:** Item 9, 10 (especially assessor 3862), 18 (especially assessor 8769) and 23
+
+::: {.panel-tabset}
+##### Fee group: Q3
+
+```{r}
+tb5_item_percent_wc_q3 <- tb5_item_percent_wc %>% 
+  filter(n_pri_fee_group7=="Fee group: Q3")
+
+make_score_flextable(tb5_item_percent_wc_q3)
+```
+##### Fee group: Q4
+
+```{r}
+tb5_item_percent_wc_q3 <- tb5_item_percent_wc %>% 
+  filter(n_pri_fee_group7=="Fee group: Q4")
+
+make_score_flextable(tb5_item_percent_wc_q3)
+```
+
+:::
+
+#### Gauteng
+
+In Gauteng its trickier to identify unusual scoring with at least one or two assessors scoring much lower than the rest for most items. Notable items include:
+
+**Fee group 3:** Items 2, 3, 6, 7,9, 10, 15, 18, 23
+
+**Fee group 4:** Items 2 (high variance), 6, 9 (assessor 2774), 15, 18, and 23 (high variance)
+
+::: {.panel-tabset}
+
+##### Fee group: Q3
+
+```{r}
+tb5_item_percent_gp_q3 <- tb5_item_percent_gp %>% 
+  filter(n_pri_fee_group7=="Fee group: Q3")
+
+make_score_flextable(tb5_item_percent_gp_q3)
+```
+##### Fee group: Q4
+
+```{r}
+tb5_item_percent_gp_q3 <- tb5_item_percent_gp %>% 
+  filter(n_pri_fee_group7=="Fee group: Q4")
+
+make_score_flextable(tb5_item_percent_gp_q3)
+```
+
+
+:::
+
+# Map of ELP locations
+
+Use this to explore the geographic locations of the ELPs. This is to explore whether Q3 and Q4 ELPs in the Western Cape and Gauteng are more frequently found in underserviced/less safe/low-income areas compared to ELPs in the same fee bracket in other provinces. 
+
+### Western Cape
+
+```{r}
+tb5_wc <- read_dta("data/2024tb5_all_forms_inter_data.dta") %>% 
+  filter(elom_prov=="Western Cape") %>% 
+  select(id_ecd, longitude, latitude, n_pri_fee_group7) %>% 
+  distinct(id_ecd, .keep_all = TRUE) %>% 
+  as_factor()
+
+# Clean coords & factors
+wc_map <- tb5_wc %>%
+  mutate(
+    longitude = as.numeric(longitude),
+    latitude  = as.numeric(latitude)
+  ) %>%
+  filter(
+    is.finite(longitude), is.finite(latitude),
+    latitude >= -90, latitude <= 90,
+    longitude >= -180, longitude <= 180,
+    !is.na(n_pri_fee_group7)
+  ) %>%
+  droplevels()
+
+# Palette that adapts to number of fee groups
+nlev <- nlevels(wc_map$n_pri_fee_group7)
+pal_vec <- if (nlev <= 8) {
+  brewer.pal(max(3, nlev), "Set2")[1:nlev]
+} else if (nlev <= 12) {
+  brewer.pal(nlev, "Set3")
+} else {
+  grDevices::hcl.colors(nlev, "Set 3")
+}
+pal <- colorFactor(palette = pal_vec, domain = levels(wc_map$n_pri_fee_group7), ordered = TRUE)
+
+# Nice popup
+wc_map$popup <- sprintf(
+  "<b>ECD ID:</b> %s<br/><b>Fee group:</b> %s",
+  wc_map$id_ecd, wc_map$n_pri_fee_group7
+) %>% lapply(HTML)
+
+# Build the map
+leaflet(wc_map, options = leafletOptions(zoomControl = TRUE)) %>%
+  addProviderTiles(providers$OpenStreetMap) %>%
+  addCircleMarkers(
+    lng = ~longitude, lat = ~latitude,
+    radius = 6, stroke = FALSE, fillOpacity = 0.9,
+    fillColor = ~pal(n_pri_fee_group7),
+    label = ~n_pri_fee_group7,
+    popup = ~popup
+    # , clusterOptions = markerClusterOptions()  # uncomment if lots of points
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    pal = pal, values = ~n_pri_fee_group7,
+    title = "Fee group", opacity = 1
+  ) %>%
+  addScaleBar(position = "bottomleft")
+
+```
+
+### Gauteng
+
+```{r}
+tb5_wc <- read_dta("data/2024tb5_all_forms_inter_data.dta") %>% 
+  filter(elom_prov=="Gauteng") %>% 
+  select(id_ecd, longitude, latitude, n_pri_fee_group7) %>% 
+  distinct(id_ecd, .keep_all = TRUE) %>% 
+  as_factor()
+
+# Clean coords & factors
+wc_map <- tb5_wc %>%
+  mutate(
+    longitude = as.numeric(longitude),
+    latitude  = as.numeric(latitude)
+  ) %>%
+  filter(
+    is.finite(longitude), is.finite(latitude),
+    # latitude >= -90, latitude <= 90,
+    # longitude >= -180, longitude <= 180,
+    !is.na(n_pri_fee_group7)
+  ) %>%
+  droplevels()
+
+# Palette that adapts to number of fee groups
+nlev <- nlevels(wc_map$n_pri_fee_group7)
+pal_vec <- if (nlev <= 8) {
+  brewer.pal(max(3, nlev), "Set2")[1:nlev]
+} else if (nlev <= 12) {
+  brewer.pal(nlev, "Set3")
+} else {
+  grDevices::hcl.colors(nlev, "Set 3")
+}
+pal <- colorFactor(palette = pal_vec, domain = levels(wc_map$n_pri_fee_group7), ordered = TRUE)
+
+# Nice popup
+wc_map$popup <- sprintf(
+  "<b>ECD ID:</b> %s<br/><b>Fee group:</b> %s",
+  wc_map$id_ecd, wc_map$n_pri_fee_group7
+) %>% lapply(HTML)
+
+# Build the map
+leaflet(wc_map, options = leafletOptions(zoomControl = TRUE)) %>%
+  addProviderTiles(providers$OpenStreetMap) %>%
+  addCircleMarkers(
+    lng = ~longitude, lat = ~latitude,
+    radius = 6, stroke = FALSE, fillOpacity = 0.9,
+    fillColor = ~pal(n_pri_fee_group7),
+    label = ~n_pri_fee_group7,
+    popup = ~popup
+    # , clusterOptions = markerClusterOptions()  # uncomment if lots of points
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    pal = pal, values = ~n_pri_fee_group7,
+    title = "Fee group", opacity = 1
+  ) %>%
+  addScaleBar(position = "bottomleft")
+
+```
+
+
+
+
+
+
